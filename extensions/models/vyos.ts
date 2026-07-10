@@ -13,7 +13,9 @@
  * The SSH transport is deliberately isolated in {@link sshExec}. Once
  * model-to-model calls (`context.runModel`) land in the distributed binary,
  * that one helper can be swapped to invoke `@swamp/ssh` (`exec`/`script`)
- * instead of shelling out, with no change to the VyOS method logic.
+ * instead of shelling out, with no change to the VyOS method logic. Every method
+ * also accepts an injectable `_ssh` runner so the logic is unit-testable without
+ * a live router.
  *
  * @module
  */
@@ -24,6 +26,16 @@ const OP_WRAPPER = "/opt/vyatta/bin/vyatta-op-cmd-wrapper";
 
 /** Sourced inside every config session so `configure`/`set`/`commit` resolve. */
 const SCRIPT_TEMPLATE = "/opt/vyatta/etc/functions/script-template";
+
+/** Emitted by the config script when the session had staged changes. */
+const SENTINEL_CHANGED = "SWAMP_APPLY_CHANGED";
+
+/** Emitted by the config script when the session was a no-op (idempotent). */
+const SENTINEL_NOCHANGE = "SWAMP_APPLY_NOCHANGE";
+
+/** Placeholder stored in place of the vbash script when `storeScript` is off. */
+const SCRIPT_REDACTED =
+  "<redacted: pass storeScript=true to persist the script>";
 
 /** Connection/authentication settings for the target VyOS router. */
 const GlobalArgsSchema = z.object({
@@ -36,7 +48,8 @@ const GlobalArgsSchema = z.object({
     .describe("Path to a private key; omit to use the SSH agent/ssh config"),
 });
 
-type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
+/** Resolved connection/authentication settings. */
+export type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
 
 /** Snapshot of the running configuration as `set` commands. */
 const ConfigSchema = z.object({
@@ -51,9 +64,17 @@ const ApplyResultSchema = z.object({
   host: z.string(),
   set: z.array(z.string()),
   delete: z.array(z.string()),
+  dryRun: z.boolean().describe(
+    "True when changes were previewed, not committed",
+  ),
+  changed: z.boolean().describe(
+    "True when the session had staged config changes",
+  ),
   committed: z.boolean(),
   saved: z.boolean(),
-  script: z.string().describe("The vbash script that was piped to the router"),
+  script: z
+    .string()
+    .describe("The vbash script that was piped (redacted unless storeScript)"),
   stdout: z.string(),
   stderr: z.string(),
   exitCode: z.number().int(),
@@ -72,11 +93,22 @@ const CommandResultSchema = z.object({
 });
 
 /** Result of a single SSH invocation. */
-interface SshResult {
+export interface SshResult {
   stdout: string;
   stderr: string;
   code: number;
 }
+
+/**
+ * Transport seam: run one command on the router over SSH, optionally piping
+ * `stdin`. Methods depend on this signature (not the implementation) so it can
+ * be injected in tests and swapped for `@swamp/ssh` when `context.runModel`
+ * ships.
+ */
+export type SshRunner = (
+  cfg: GlobalArgs,
+  opts: { command?: string[]; stdin?: string },
+) => Promise<SshResult>;
 
 /**
  * Run one command on the router over SSH, optionally piping `stdin`.
@@ -90,10 +122,7 @@ interface SshResult {
  * @param opts `command` (remote argv joined by ssh) and/or `stdin` to pipe.
  * @returns Captured stdout, stderr, and exit code.
  */
-async function sshExec(
-  cfg: GlobalArgs,
-  opts: { command?: string[]; stdin?: string },
-): Promise<SshResult> {
+export const sshExec: SshRunner = async (cfg, opts) => {
   const args: string[] = [
     "-o",
     "BatchMode=yes",
@@ -126,32 +155,103 @@ async function sshExec(
     stderr: new TextDecoder().decode(stderr),
     code,
   };
+};
+
+/**
+ * Validate caller-supplied `set`/`delete` config paths before they are
+ * interpolated into a vbash script. Rejects the common footguns: empty paths,
+ * embedded newlines (which would break the generated script line structure),
+ * and a leading `set `/`delete ` (the caller must pass the bare path).
+ *
+ * @throws Error if any path is empty, multi-line, or leadingly prefixed.
+ */
+export function validateApplyPaths(sets: string[], deletes: string[]): void {
+  for (const [kind, list] of [["set", sets], ["delete", deletes]] as const) {
+    for (const p of list) {
+      if (p.trim() === "") {
+        throw new Error(`apply ${kind} contains an empty path`);
+      }
+      if (/[\r\n]/.test(p)) {
+        throw new Error(
+          `apply ${kind} path must be single-line: ${JSON.stringify(p)}`,
+        );
+      }
+      if (/^\s*(set|delete)\s/.test(p)) {
+        throw new Error(
+          `apply ${kind} path must omit the leading '${kind}': ${
+            JSON.stringify(p)
+          }`,
+        );
+      }
+    }
+  }
 }
 
-/** Build the vbash config script piped to `/bin/vbash -s`. */
-function buildConfigScript(
-  sets: string[],
-  deletes: string[],
-  commit: boolean,
-  save: boolean,
-): string {
+/** Options controlling the generated vbash config script. */
+export interface ConfigScriptOptions {
+  sets: string[];
+  deletes: string[];
+  commit: boolean;
+  save: boolean;
+  dryRun: boolean;
+}
+
+/**
+ * Build the vbash config script piped to `/bin/vbash -s`.
+ *
+ * Deletes are guarded with `cli-shell-api existsActive` so re-deleting an
+ * already-absent path is a no-op (idempotent). The session only commits when
+ * `cli-shell-api sessionChanged` reports staged changes, so a repeat apply that
+ * changes nothing succeeds instead of erroring on an empty commit. In `dryRun`
+ * mode the staged diff is printed via `compare` and then discarded.
+ */
+export function buildConfigScript(opts: ConfigScriptOptions): string {
   const lines = [`source ${SCRIPT_TEMPLATE}`, "configure"];
-  for (const d of deletes) lines.push(`delete ${d}`);
-  for (const s of sets) lines.push(`set ${s}`);
-  if (commit) lines.push("commit");
-  if (save) lines.push("save");
-  lines.push("exit");
+  for (const d of opts.deletes) {
+    lines.push(`if cli-shell-api existsActive ${d}; then delete ${d}; fi`);
+  }
+  for (const s of opts.sets) lines.push(`set ${s}`);
+  lines.push("if cli-shell-api sessionChanged; then");
+  if (opts.dryRun) {
+    lines.push("  compare");
+    lines.push(`  echo ${SENTINEL_CHANGED}`);
+    lines.push("  exit discard");
+  } else {
+    if (opts.commit) lines.push("  commit");
+    if (opts.save) lines.push("  save");
+    lines.push(`  echo ${SENTINEL_CHANGED}`);
+    lines.push(opts.commit ? "  exit" : "  exit discard");
+  }
+  lines.push("else");
+  lines.push(`  echo ${SENTINEL_NOCHANGE}`);
+  lines.push("  exit");
+  lines.push("fi");
   return lines.join("\n") + "\n";
+}
+
+/** Minimal LogTape logger surface used by this model. */
+interface Logger {
+  debug: (message: string, properties?: Record<string, unknown>) => void;
+  info: (message: string, properties?: Record<string, unknown>) => void;
+  warning: (message: string, properties?: Record<string, unknown>) => void;
+  error: (message: string, properties?: Record<string, unknown>) => void;
 }
 
 /** Minimal shape of the execute context this model relies on. */
 interface ExecuteContext {
   globalArgs: GlobalArgs;
+  logger: Logger;
   writeResource: (
     specName: string,
     name: string,
     data: Record<string, unknown>,
   ) => Promise<{ name: string }>;
+}
+
+/** Minimal shape of the pre-flight check context this model relies on. */
+interface CheckContext {
+  globalArgs: GlobalArgs;
+  logger: Logger;
 }
 
 /** Return shape for every method's execute function. */
@@ -162,7 +262,7 @@ interface ExecuteResult {
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.10.1",
+  version: "2026.07.10.2",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,
@@ -186,6 +286,38 @@ export const model = {
       garbageCollection: 50,
     },
   },
+  checks: {
+    "reachable": {
+      description:
+        "Verify the router's config mode is reachable over SSH before applying.",
+      labels: ["live"],
+      appliesTo: ["apply"],
+      execute: async (context: CheckContext): Promise<
+        { pass: boolean; errors?: string[] }
+      > => {
+        const cfg = context.globalArgs;
+        context.logger.info("Probing VyOS config mode on {host}", {
+          host: cfg.host,
+        });
+        const probe = `source ${SCRIPT_TEMPLATE}\nconfigure\nexit\n`;
+        const result = await sshExec(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: probe,
+        });
+        if (result.code !== 0) {
+          return {
+            pass: false,
+            errors: [
+              `cannot reach VyOS config mode on ${cfg.host}: ${
+                result.stderr.trim() || `exit ${result.code}`
+              }`,
+            ],
+          };
+        }
+        return { pass: true };
+      },
+    },
+  },
   methods: {
     show: {
       description:
@@ -197,14 +329,23 @@ export const model = {
           .describe("Op-mode command to run (without the wrapper prefix)"),
       }),
       execute: async (
-        args: { command: string },
+        args: { command: string; _ssh?: SshRunner },
         context: ExecuteContext,
       ): Promise<ExecuteResult> => {
         const cfg = context.globalArgs;
-        const result = await sshExec(cfg, {
+        const ssh = args._ssh ?? sshExec;
+        context.logger.info("Reading config from {host}: {command}", {
+          host: cfg.host,
+          command: args.command,
+        });
+        const result = await ssh(cfg, {
           command: [OP_WRAPPER, ...args.command.split(/\s+/)],
         });
         if (result.code !== 0) {
+          context.logger.error("show failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
           throw new Error(
             `show failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
           );
@@ -214,6 +355,9 @@ export const model = {
           command: args.command,
           commands: result.stdout,
           retrievedAt: new Date().toISOString(),
+        });
+        context.logger.info("Snapshotted config from {host}", {
+          host: cfg.host,
         });
         return { dataHandles: [handle] };
       },
@@ -232,6 +376,14 @@ export const model = {
           .describe("Config paths to delete (without the leading 'delete')"),
         commit: z.boolean().default(true),
         save: z.boolean().default(true),
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe("Stage changes and print the diff without committing"),
+        storeScript: z
+          .boolean()
+          .default(false)
+          .describe("Persist the generated vbash script (may contain secrets)"),
       }),
       execute: async (
         args: {
@@ -239,40 +391,67 @@ export const model = {
           delete: string[];
           commit: boolean;
           save: boolean;
+          dryRun: boolean;
+          storeScript: boolean;
+          _ssh?: SshRunner;
         },
         context: ExecuteContext,
       ): Promise<ExecuteResult> => {
         const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
         if (args.set.length === 0 && args.delete.length === 0) {
           throw new Error("apply requires at least one set or delete command");
         }
-        const script = buildConfigScript(
-          args.set,
-          args.delete,
-          args.commit,
-          args.save,
+        validateApplyPaths(args.set, args.delete);
+        const script = buildConfigScript({
+          sets: args.set,
+          deletes: args.delete,
+          commit: args.commit,
+          save: args.save,
+          dryRun: args.dryRun,
+        });
+        context.logger.info(
+          "Applying to {host}: {sets} set, {deletes} delete (dryRun={dryRun})",
+          {
+            host: cfg.host,
+            sets: args.set.length,
+            deletes: args.delete.length,
+            dryRun: args.dryRun,
+          },
         );
-        const result = await sshExec(cfg, {
+        const result = await ssh(cfg, {
           command: ["/bin/vbash", "-s"],
           stdin: script,
         });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const committed = args.commit && changed && !args.dryRun;
         const handle = await context.writeResource("applyResult", "last", {
           host: cfg.host,
           set: args.set,
           delete: args.delete,
-          committed: args.commit,
-          saved: args.save,
-          script,
+          dryRun: args.dryRun,
+          changed,
+          committed,
+          saved: committed && args.save,
+          script: args.storeScript ? script : SCRIPT_REDACTED,
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.code,
           appliedAt: new Date().toISOString(),
         });
         if (result.code !== 0) {
+          context.logger.error("apply failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
           throw new Error(
             `apply failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
           );
         }
+        context.logger.info(
+          "apply on {host} complete (changed={changed}, committed={committed})",
+          { host: cfg.host, changed, committed },
+        );
         return { dataHandles: [handle] };
       },
     },
@@ -287,14 +466,20 @@ export const model = {
           .describe("Prefix with the VyOS op-mode wrapper"),
       }),
       execute: async (
-        args: { command: string; opMode: boolean },
+        args: { command: string; opMode: boolean; _ssh?: SshRunner },
         context: ExecuteContext,
       ): Promise<ExecuteResult> => {
         const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        context.logger.info("Running on {host} (opMode={opMode}): {command}", {
+          host: cfg.host,
+          opMode: args.opMode,
+          command: args.command,
+        });
         const argv = args.opMode
           ? [OP_WRAPPER, ...args.command.split(/\s+/)]
           : ["sh", "-c", args.command];
-        const result = await sshExec(cfg, { command: argv });
+        const result = await ssh(cfg, { command: argv });
         const handle = await context.writeResource("commandResult", "last", {
           host: cfg.host,
           command: args.command,
@@ -305,10 +490,15 @@ export const model = {
           ranAt: new Date().toISOString(),
         });
         if (result.code !== 0) {
+          context.logger.error("run failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
           throw new Error(
             `run failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
           );
         }
+        context.logger.info("run on {host} complete", { host: cfg.host });
         return { dataHandles: [handle] };
       },
     },

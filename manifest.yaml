@@ -12,6 +12,9 @@ additionalFiles:
 models:
   - vyos.ts
 
+reports:
+  - vyos_firewall.ts
+
 # Empty platforms == universal (earns both platform factors). The model shells
 # out to the host `ssh` binary, which is present on linux and darwin alike.
 platforms: []

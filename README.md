@@ -106,14 +106,44 @@ firewall assignments, etc. are left untouched (it reads current state to
 reconcile only the address list). Full interface removal is intentionally left
 to raw `apply --delete` rather than a typed method.
 
+**Firewall** (`syncFirewall` / `ensureFirewall` / `removeFirewall`) manages one
+named ruleset of the hook-based (VyOS 1.4+) firewall — `firewall <family> name
+<name>`, where `family` is `ipv4` or `ipv6`. A ruleset is managed as **one
+declarative unit**: `ensureFirewall` wipes the named-ruleset subtree and sets the
+desired `default-action`, `description`, and numbered `rules` in one session, so
+the ruleset ends up **exactly** as specified (rules you omit are removed) and
+re-running the same input is a true no-op. Each rule models the common
+match/target leaves — `action`, `protocol`, `state[]`, `source`/`destination`
+(`address`, `port`, and `group` address-/network-/port-group), `inboundInterface`
+/ `outboundInterface`, `jumpTarget`, `log`, `disable` — plus a `raw[]` escape
+hatch for any leaf not modeled (appended verbatim under the rule). The
+`firewallRuleset` resource is cleartext (a ruleset carries no secrets). Because
+the whole ruleset is authoritative, always pass the **complete** set of rules (or
+`syncFirewall` first and amend that state) — an omitted rule is a deletion.
+
 ```sh
-# Declaratively pin an interface to a single 0bed prefix + default route
+# Preview a whole-ruleset reconcile (add/replace rules; omitted rules removed):
+swamp model method run my-router ensureFirewall \
+  --input family=ipv4 --input name=GUEST-FWD --input defaultAction=drop \
+  --input rules='[
+    {"num":10,"action":"accept","state":["established","related"]},
+    {"num":30,"action":"accept","protocol":"tcp","state":["new"],
+     "destination":{"address":"198.51.100.10","port":"1883"}},
+    {"num":100,"action":"drop","state":["new"],
+     "destination":{"address":"203.0.113.0/24"},"log":true}
+  ]' --input dryRun=true
+
+swamp model method run my-router syncFirewall --input family=ipv4 --input name=GUEST-FWD
+```
+
+```sh
+# Declaratively pin an interface to a single prefix + default route
 # (removes any stale prefixes, e.g. a leftover ::/64) — preview first:
-swamp model method run my-router ensureRouterAdvert --input interface=br10.95 \
-  --input prefixes='[{"prefix":"2001:db8:bed:95::/64"}]' \
+swamp model method run my-router ensureRouterAdvert --input interface=eth1 \
+  --input prefixes='[{"prefix":"2001:db8:1::/64"}]' \
   --input routes='["::/0"]' --input dryRun=true
 
-swamp model method run my-router syncRouterAdvert --input interface=br10.95
+swamp model method run my-router syncRouterAdvert --input interface=eth1
 ```
 
 ## Sensitive output

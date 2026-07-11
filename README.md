@@ -146,6 +146,50 @@ swamp model method run my-router ensureRouterAdvert --input interface=eth1 \
 swamp model method run my-router syncRouterAdvert --input interface=eth1
 ```
 
+**NAT** (`syncNat` / `ensureNat` / `removeNat`) manages one NAT **direction**'s
+rule list — `nat source` or `nat destination` (`direction` arg) — declaratively
+as one unit, exactly like a firewall ruleset: `ensureNat` wipes the direction's
+`rule` subtree and sets the desired rules, so the direction ends up **exactly**
+as specified (omitted rules removed) and a repeat is a true no-op. Each rule
+models `protocol`, `source`/`destination` (`address`, `port`, and `group`
+address-/network-/port-group), `inboundInterface` / `outboundInterface`,
+`translation` (`address` — an IP/range or the literal `masquerade` — and `port`),
+`exclude`, `disable`, `log`, plus a `raw[]` escape hatch. Cleartext `natRuleset`
+resource. As with firewall, pass the **complete** rule list (or `syncNat` first
+and amend) — an omitted rule is a deletion.
+
+```sh
+# Preview a source-NAT (masquerade) reconcile:
+swamp model method run my-router ensureNat --input direction=source \
+  --input rules='[
+    {"num":100,"outboundInterface":"eth0","source":{"address":"192.0.2.0/24"},
+     "translation":{"address":"masquerade"}}
+  ]' --input dryRun=true
+
+swamp model method run my-router syncNat --input direction=source
+```
+
+**Static routes** (`syncStaticRoute` / `ensureStaticRoute` / `removeStaticRoute`)
+manages one destination **prefix** — `protocols static route <prefix>` (IPv4) or
+`route6 <prefix>` (IPv6), auto-selected from the prefix — declaratively, like
+router-advert manages one interface. `ensureStaticRoute` wipes the prefix's
+subtree and sets the desired `nextHops` (each with optional `distance` /
+`disable` / `interface`), `interfaceRoutes`, `blackhole`, `dhcpInterface`, and
+`description`, so the route ends up exactly as specified; a repeat is a no-op.
+Cleartext `staticRoute` resource (its instance name slugifies `/` to `_`, e.g.
+`192.0.2.0_24`, while the `prefix` field stays verbatim).
+
+```sh
+# Preview a static route with two weighted next-hops:
+swamp model method run my-router ensureStaticRoute --input prefix=203.0.113.0/24 \
+  --input nextHops='[
+    {"nextHop":"192.0.2.1","distance":1},
+    {"nextHop":"192.0.2.2","distance":10}
+  ]' --input dryRun=true
+
+swamp model method run my-router syncStaticRoute --input prefix=203.0.113.0/24
+```
+
 ## Sensitive output
 
 By default an `apply` result stores `stdout`/`stderr` in cleartext and redacts

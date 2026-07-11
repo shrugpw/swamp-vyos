@@ -1,0 +1,26 @@
+# === PUBLIC MIRROR whitelist (github.com/shrugpw/swamp-vyos) ===
+# This dir is both the local swamp package (with dev/runtime state, incl.
+# .swamp/secrets vault key, vault configs, model instances) AND the git checkout
+# of the PUBLIC mirror. Whitelist: ignore everything, re-include only the public
+# package files, so dev/secret state can NEVER be committed to the public repo.
+/*
+!/.gitignore
+!/manifest.yaml
+!/README.md
+!/LICENSE.txt
+!/extensions/
+
+# BEGIN swamp managed section - DO NOT EDIT
+
+# Runtime data (not needed in version control)
+.swamp/
+
+# Local extension sources (developer-specific, not shared)
+.swamp-sources.yaml
+
+# Claude Code configuration (managed by swamp)
+.claude/worktrees/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+# END swamp managed section

@@ -15,6 +15,7 @@ import {
 } from "jsr:@std/assert@1";
 import {
   buildConfigScript,
+  extractDiff,
   model,
   type SshResult,
   type SshRunner,
@@ -76,6 +77,10 @@ const showExec = (model.methods.show.execute) as any;
 const applyExec = (model.methods.apply.execute) as any;
 // deno-lint-ignore no-explicit-any
 const runExec = (model.methods.run.execute) as any;
+// deno-lint-ignore no-explicit-any
+const diffExec = (model.methods.diff.execute) as any;
+// deno-lint-ignore no-explicit-any
+const treeExec = (model.methods.tree.execute) as any;
 
 // --- validateApplyPaths -----------------------------------------------------
 
@@ -210,6 +215,86 @@ Deno.test("show throws on nonzero exit and writes nothing", async () => {
   assertEquals(writes.length, 0);
 });
 
+// --- tree -------------------------------------------------------------------
+
+Deno.test("tree parses configuration json into the configTree spec", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await treeExec(
+    {
+      sensitive: false,
+      _ssh: stubSsh(
+        {
+          stdout:
+            '{"system":{"host-name":"vyos"},"interfaces":{"ethernet":{"eth0":{}}}}',
+        },
+        calls,
+      ),
+    },
+    context,
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].specName, "configTree");
+  assertEquals(writes[0].name, "current");
+  // native JSON is read through the op-mode wrapper
+  assertEquals(calls[0].command, [
+    "/opt/vyatta/bin/vyatta-op-cmd-wrapper",
+    "show",
+    "configuration",
+    "json",
+  ]);
+  // the parsed sections are spread onto the record
+  assertEquals(
+    (writes[0].data.system as Record<string, unknown>)["host-name"],
+    "vyos",
+  );
+  assert(writes[0].data.interfaces !== undefined);
+  assertEquals(writes[0].data.host, "192.0.2.1");
+});
+
+Deno.test("tree sensitive routes to the sensitiveConfigTree spec", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await treeExec(
+    {
+      sensitive: true,
+      _ssh: stubSsh({ stdout: '{"pki":{"key-pair":{"k":{}}}}' }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].specName, "sensitiveConfigTree");
+});
+
+Deno.test("tree throws on nonzero exit and writes nothing", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      treeExec(
+        { sensitive: false, _ssh: stubSsh({ code: 1, stderr: "boom" }, calls) },
+        context,
+      ),
+    Error,
+    "tree failed",
+  );
+  assertEquals(writes.length, 0);
+});
+
+Deno.test("tree throws on malformed json without writing", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      treeExec(
+        { sensitive: false, _ssh: stubSsh({ stdout: "not json{" }, calls) },
+        context,
+      ),
+    Error,
+    "could not parse",
+  );
+  assertEquals(writes.length, 0);
+});
+
 // --- apply ------------------------------------------------------------------
 
 Deno.test("apply requires at least one set or delete", async () => {
@@ -274,6 +359,49 @@ Deno.test("apply persists the script when storeScript=true", async () => {
     context,
   );
   assert(String(writes[0].data.script).includes("configure"));
+});
+
+Deno.test("apply sensitive routes to sensitiveApplyResult and stores full script", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await applyExec(
+    {
+      set: ["interfaces wireguard wg0 private-key SECRET"],
+      delete: [],
+      commit: true,
+      save: true,
+      dryRun: false,
+      storeScript: false,
+      sensitive: true,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].specName, "sensitiveApplyResult");
+  // Even with storeScript=false, the script is persisted in full when
+  // sensitive (the vault protects it), never the redaction placeholder.
+  assert(String(writes[0].data.script).includes("configure"));
+  assert(!String(writes[0].data.script).startsWith("<redacted"));
+});
+
+Deno.test("apply defaults to the cleartext applyResult spec", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await applyExec(
+    {
+      set: ["interface eth0 description test"],
+      delete: [],
+      commit: true,
+      save: true,
+      dryRun: false,
+      storeScript: false,
+      sensitive: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].specName, "applyResult");
 });
 
 Deno.test("apply no-op reports changed=false, committed=false", async () => {
@@ -364,6 +492,135 @@ Deno.test("apply rejects a malformed path before touching SSH", async () => {
   );
   assertEquals(calls.length, 0);
   assertEquals(writes.length, 0);
+});
+
+// --- extractDiff ------------------------------------------------------------
+
+Deno.test("extractDiff strips the sentinel and trailing whitespace", () => {
+  assertEquals(
+    extractDiff("+set x y\n-delete z\nSWAMP_APPLY_CHANGED\n"),
+    "+set x y\n-delete z",
+  );
+});
+
+Deno.test("extractDiff returns empty for a no-op", () => {
+  assertEquals(extractDiff("SWAMP_APPLY_NOCHANGE\n"), "");
+});
+
+// --- diff -------------------------------------------------------------------
+
+Deno.test("diff requires at least one set or delete", async () => {
+  const { context } = fakeContext();
+  await assertRejects(
+    () => diffExec({ set: [], delete: [], sensitive: false }, context),
+    Error,
+    "at least one",
+  );
+});
+
+Deno.test("diff stages a dryRun compare, never commits, writes the diff spec", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await diffExec(
+    {
+      set: ["interface eth0 description test"],
+      delete: [],
+      sensitive: false,
+      _ssh: stubSsh(
+        {
+          stdout: "+set interface eth0 description test\nSWAMP_APPLY_CHANGED\n",
+        },
+        calls,
+      ),
+    },
+    context,
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].specName, "diff");
+  assertEquals(writes[0].data.changed, true);
+  assertEquals(
+    writes[0].data.diff,
+    "+set interface eth0 description test",
+  );
+  // The generated script previews and discards — it must never commit/save.
+  const script = String(calls[0].stdin);
+  assert(script.includes("compare"));
+  assert(script.includes("exit discard"));
+  assert(!script.includes("\n  commit"));
+  assert(!script.includes("\n  save"));
+});
+
+Deno.test("diff no-op reports changed=false and empty diff", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await diffExec(
+    {
+      set: [],
+      delete: ["service dns forwarding"],
+      sensitive: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_NOCHANGE\n" }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].data.changed, false);
+  assertEquals(writes[0].data.diff, "");
+});
+
+Deno.test("diff sensitive routes to the sensitiveDiff spec", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await diffExec(
+    {
+      set: ["interfaces wireguard wg0 private-key SECRET"],
+      delete: [],
+      sensitive: true,
+      _ssh: stubSsh({ stdout: "+set ...\nSWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].specName, "sensitiveDiff");
+});
+
+Deno.test("diff rejects a malformed path before touching SSH", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      diffExec(
+        {
+          set: ["set interface eth0"],
+          delete: [],
+          sensitive: false,
+          _ssh: stubSsh({}, calls),
+        },
+        context,
+      ),
+    Error,
+    "omit the leading",
+  );
+  assertEquals(calls.length, 0);
+  assertEquals(writes.length, 0);
+});
+
+Deno.test("diff writes the result BEFORE throwing on nonzero exit", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      diffExec(
+        {
+          set: ["interface eth0 description test"],
+          delete: [],
+          sensitive: false,
+          _ssh: stubSsh({ code: 1, stderr: "compare failed" }, calls),
+        },
+        context,
+      ),
+    Error,
+    "diff failed",
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].data.exitCode, 1);
 });
 
 // --- run --------------------------------------------------------------------

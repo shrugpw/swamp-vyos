@@ -45,7 +45,11 @@ const GlobalArgsSchema = z.object({
   identityFile: z
     .string()
     .optional()
-    .describe("Path to a private key; omit to use the SSH agent/ssh config"),
+    .describe(
+      "Path to a private key; presented with IdentitiesOnly so only this key " +
+        "is offered (avoids MaxAuthTries when the agent holds many keys). " +
+        "Omit to use the SSH agent/ssh config.",
+    ),
 });
 
 /** Resolved connection/authentication settings. */
@@ -58,6 +62,34 @@ const ConfigSchema = z.object({
   commands: z.string().describe("Raw output of the op-mode show command"),
   retrievedAt: z.iso.datetime(),
 });
+
+/**
+ * Structured running configuration from native `show configuration json`.
+ *
+ * The well-known top-level sections are declared so CEL expressions can
+ * reference them (e.g. `...attributes.interfaces`), and `.passthrough()` keeps
+ * any section a given VyOS version emits that isn't listed here (rather than
+ * silently dropping it). Nested content is intentionally permissive — the VyOS
+ * tree is deep and version-variable.
+ */
+const treeSection = () => z.record(z.string(), z.unknown()).optional();
+const ConfigTreeSchema = z.object({
+  host: z.string(),
+  container: treeSection(),
+  firewall: treeSection(),
+  interfaces: treeSection(),
+  "load-balancing": treeSection(),
+  nat: treeSection(),
+  nat64: treeSection(),
+  pki: treeSection(),
+  policy: treeSection(),
+  protocols: treeSection(),
+  qos: treeSection(),
+  service: treeSection(),
+  system: treeSection(),
+  vrf: treeSection(),
+  retrievedAt: z.iso.datetime(),
+}).passthrough();
 
 /** Outcome of an `apply` (config-mode) run. */
 const ApplyResultSchema = z.object({
@@ -79,6 +111,58 @@ const ApplyResultSchema = z.object({
   stderr: z.string(),
   exitCode: z.number().int(),
   appliedAt: z.iso.datetime(),
+});
+
+/**
+ * Same shape as {@link ApplyResultSchema}, but the secret-bearing fields are
+ * marked `sensitive` so they are stored in the `vyos` vault and replaced with
+ * vault references at persist time. Operational fields (host, changed,
+ * committed, exitCode, ...) stay in cleartext so the record is still glanceable
+ * without vault access. Written only when `apply` is called with `sensitive`.
+ */
+const SensitiveApplyResultSchema = ApplyResultSchema.extend({
+  set: z.array(z.string()).meta({ sensitive: true }),
+  delete: z.array(z.string()).meta({ sensitive: true }),
+  script: z
+    .string()
+    .meta({ sensitive: true })
+    .describe("The vbash script that was piped (vaulted)"),
+  stdout: z.string().meta({ sensitive: true }),
+  stderr: z.string().meta({ sensitive: true }),
+});
+
+/** Preview of the config change a `set`/`delete` would make (VyOS `compare`). */
+const DiffResultSchema = z.object({
+  host: z.string(),
+  set: z.array(z.string()),
+  delete: z.array(z.string()),
+  changed: z.boolean().describe(
+    "True when the staged change differs from the running config",
+  ),
+  diff: z
+    .string()
+    .describe(
+      "The `compare` output for the staged change (empty if unchanged)",
+    ),
+  stderr: z.string(),
+  exitCode: z.number().int(),
+  comparedAt: z.iso.datetime(),
+});
+
+/**
+ * Same shape as {@link DiffResultSchema} with the secret-bearing fields marked
+ * `sensitive` (the `compare` output echoes staged `set` lines, which may include
+ * keys). Vaulted; operational fields stay cleartext. Written when `diff` is
+ * called with `sensitive`.
+ */
+const SensitiveDiffResultSchema = DiffResultSchema.extend({
+  set: z.array(z.string()).meta({ sensitive: true }),
+  delete: z.array(z.string()).meta({ sensitive: true }),
+  diff: z
+    .string()
+    .meta({ sensitive: true })
+    .describe("The `compare` output for the staged change (vaulted)"),
+  stderr: z.string().meta({ sensitive: true }),
 });
 
 /** Outcome of a generic `run` (op- or config-mode) command. */
@@ -131,7 +215,15 @@ export const sshExec: SshRunner = async (cfg, opts) => {
     "-p",
     String(cfg.port),
   ];
-  if (cfg.identityFile) args.push("-i", cfg.identityFile);
+  if (cfg.identityFile) {
+    // Scope authentication to this one key. Without IdentitiesOnly, ssh still
+    // offers every identity the agent holds first, which can trip the server's
+    // MaxAuthTries (and abort with "Too many authentication failures") before
+    // this key is ever tried. The agent is still used to sign if it holds the
+    // key — this only restricts *which* identity is presented, it does not
+    // bypass the agent.
+    args.push("-o", "IdentitiesOnly=yes", "-i", cfg.identityFile);
+  }
   args.push(`${cfg.user}@${cfg.host}`);
   if (opts.command) args.push(...opts.command);
 
@@ -229,6 +321,21 @@ export function buildConfigScript(opts: ConfigScriptOptions): string {
   return lines.join("\n") + "\n";
 }
 
+/**
+ * Extract the `compare` diff from a dryRun script's stdout by dropping the
+ * sentinel marker lines. Returns "" when the session was a no-op.
+ */
+export function extractDiff(stdout: string): string {
+  return stdout
+    .split("\n")
+    .filter((l) => {
+      const t = l.trim();
+      return t !== SENTINEL_CHANGED && t !== SENTINEL_NOCHANGE;
+    })
+    .join("\n")
+    .replace(/\s+$/, "");
+}
+
 /** Minimal LogTape logger surface used by this model. */
 interface Logger {
   debug: (message: string, properties?: Record<string, unknown>) => void;
@@ -262,7 +369,7 @@ interface ExecuteResult {
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.10.2",
+  version: "2026.07.10.5",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,
@@ -279,6 +386,44 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 50,
     },
+    "sensitiveApplyResult": {
+      description:
+        "Outcome of an apply run with secret-bearing fields vaulted (sensitive=true)",
+      schema: SensitiveApplyResultSchema,
+      vaultName: "vyos",
+      lifetime: "infinite",
+      garbageCollection: 50,
+    },
+    "diff": {
+      description:
+        "Preview of a set/delete change (VyOS compare), never committed",
+      schema: DiffResultSchema,
+      lifetime: "infinite",
+      garbageCollection: 50,
+    },
+    "sensitiveDiff": {
+      description:
+        "Preview of a set/delete change with secret-bearing fields vaulted (sensitive=true)",
+      schema: SensitiveDiffResultSchema,
+      vaultName: "vyos",
+      lifetime: "infinite",
+      garbageCollection: 50,
+    },
+    "configTree": {
+      description: "Structured running config (native show configuration json)",
+      schema: ConfigTreeSchema,
+      lifetime: "infinite",
+      garbageCollection: 20,
+    },
+    "sensitiveConfigTree": {
+      description:
+        "Structured running config with the whole tree vaulted (sensitive=true)",
+      schema: ConfigTreeSchema,
+      sensitiveOutput: true,
+      vaultName: "vyos",
+      lifetime: "infinite",
+      garbageCollection: 20,
+    },
     "commandResult": {
       description: "Outcome of a generic run command",
       schema: CommandResultSchema,
@@ -291,7 +436,7 @@ export const model = {
       description:
         "Verify the router's config mode is reachable over SSH before applying.",
       labels: ["live"],
-      appliesTo: ["apply"],
+      appliesTo: ["apply", "diff"],
       execute: async (context: CheckContext): Promise<
         { pass: boolean; errors?: string[] }
       > => {
@@ -362,6 +507,64 @@ export const model = {
         return { dataHandles: [handle] };
       },
     },
+    tree: {
+      description:
+        "Read the running config as a structured tree (native show configuration json), queryable via CEL.",
+      arguments: z.object({
+        sensitive: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Vault the whole config tree (it embeds WireGuard/PKI private " +
+              "keys) in the 'vyos' vault; requires that vault to be configured",
+          ),
+      }),
+      execute: async (
+        args: { sensitive: boolean; _ssh?: SshRunner },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        context.logger.info("Reading config tree from {host}", {
+          host: cfg.host,
+        });
+        const result = await ssh(cfg, {
+          command: [OP_WRAPPER, "show", "configuration", "json"],
+        });
+        if (result.code !== 0) {
+          context.logger.error("tree failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
+          throw new Error(
+            `tree failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(result.stdout);
+        } catch (e) {
+          throw new Error(
+            `tree: could not parse 'show configuration json' from ${cfg.host}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+        const targetSpec = args.sensitive
+          ? "sensitiveConfigTree"
+          : "configTree";
+        const handle = await context.writeResource(targetSpec, "current", {
+          host: cfg.host,
+          ...parsed,
+          retrievedAt: new Date().toISOString(),
+        });
+        context.logger.info(
+          "Snapshotted config tree from {host} ({sections} sections)",
+          { host: cfg.host, sections: Object.keys(parsed).length },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
     apply: {
       description:
         "Apply set/delete config commands via vbash, then commit and save.",
@@ -384,6 +587,13 @@ export const model = {
           .boolean()
           .default(false)
           .describe("Persist the generated vbash script (may contain secrets)"),
+        sensitive: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Vault the secret-bearing fields (set/delete/script/stdout/stderr) " +
+              "in the 'vyos' vault; requires that vault to be configured",
+          ),
       }),
       execute: async (
         args: {
@@ -393,6 +603,7 @@ export const model = {
           save: boolean;
           dryRun: boolean;
           storeScript: boolean;
+          sensitive: boolean;
           _ssh?: SshRunner;
         },
         context: ExecuteContext,
@@ -425,7 +636,13 @@ export const model = {
         });
         const changed = result.stdout.includes(SENTINEL_CHANGED);
         const committed = args.commit && changed && !args.dryRun;
-        const handle = await context.writeResource("applyResult", "last", {
+        // When sensitive, the whole record is vaulted, so redacting the script
+        // is pointless — persist it in full (it is protected by the vault).
+        const persistFullScript = args.sensitive || args.storeScript;
+        const targetSpec = args.sensitive
+          ? "sensitiveApplyResult"
+          : "applyResult";
+        const handle = await context.writeResource(targetSpec, "last", {
           host: cfg.host,
           set: args.set,
           delete: args.delete,
@@ -433,7 +650,7 @@ export const model = {
           changed,
           committed,
           saved: committed && args.save,
-          script: args.storeScript ? script : SCRIPT_REDACTED,
+          script: persistFullScript ? script : SCRIPT_REDACTED,
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.code,
@@ -452,6 +669,92 @@ export const model = {
           "apply on {host} complete (changed={changed}, committed={committed})",
           { host: cfg.host, changed, committed },
         );
+        return { dataHandles: [handle] };
+      },
+    },
+    diff: {
+      description:
+        "Preview the config change a set/delete would make (VyOS compare) without committing — read-only.",
+      arguments: z.object({
+        set: z
+          .array(z.string())
+          .default([])
+          .describe("Config paths to stage as set (without the leading 'set')"),
+        delete: z
+          .array(z.string())
+          .default([])
+          .describe(
+            "Config paths to stage as delete (without the leading 'delete')",
+          ),
+        sensitive: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Vault the secret-bearing fields (set/delete/diff/stderr) in the " +
+              "'vyos' vault; requires that vault to be configured",
+          ),
+      }),
+      execute: async (
+        args: {
+          set: string[];
+          delete: string[];
+          sensitive: boolean;
+          _ssh?: SshRunner;
+        },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        if (args.set.length === 0 && args.delete.length === 0) {
+          throw new Error("diff requires at least one set or delete command");
+        }
+        validateApplyPaths(args.set, args.delete);
+        // dryRun stages the change, prints `compare`, and discards — never
+        // commits. commit/save are irrelevant in the dryRun branch.
+        const script = buildConfigScript({
+          sets: args.set,
+          deletes: args.delete,
+          commit: false,
+          save: false,
+          dryRun: true,
+        });
+        context.logger.info(
+          "Diffing on {host}: {sets} set, {deletes} delete",
+          {
+            host: cfg.host,
+            sets: args.set.length,
+            deletes: args.delete.length,
+          },
+        );
+        const result = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: script,
+        });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const targetSpec = args.sensitive ? "sensitiveDiff" : "diff";
+        const handle = await context.writeResource(targetSpec, "last", {
+          host: cfg.host,
+          set: args.set,
+          delete: args.delete,
+          changed,
+          diff: extractDiff(result.stdout),
+          stderr: result.stderr,
+          exitCode: result.code,
+          comparedAt: new Date().toISOString(),
+        });
+        if (result.code !== 0) {
+          context.logger.error("diff failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
+          throw new Error(
+            `diff failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        context.logger.info("diff on {host} complete (changed={changed})", {
+          host: cfg.host,
+          changed,
+        });
         return { dataHandles: [handle] };
       },
     },

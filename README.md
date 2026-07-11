@@ -8,7 +8,7 @@ so callers work in terms of plain config paths instead of `vbash` incantations.
 VyOS is peculiar: configuration mode requires `vbash` sourcing the Vyatta
 `script-template` (a plain `ssh host 'configure; set ...'` does **not** work),
 and operational reads go through the `vyatta-op-cmd-wrapper`. This model hides
-both requirements behind three methods.
+both requirements behind five methods.
 
 ## Installation
 
@@ -28,22 +28,78 @@ swamp model create @shrug/vyos my-router \
 # Read the running config (snapshots to the "config" resource)
 swamp model method run my-router show
 
+# Read the running config as a structured, CEL-queryable tree
+swamp model method run my-router tree
+
+# Preview a change without touching the router (read-only VyOS `compare`)
+swamp model method run my-router diff \
+  --input set='["interface eth0 description uplink"]'
+
 # Apply a change: delete a config path, then commit + save
 swamp model method run my-router apply \
   --input delete='["service router-advert interface eth1 prefix 2001:db8:1::/64"]'
 
 # Run an arbitrary command (opMode=true wraps it for op-mode)
 swamp model method run my-router run --input command="show interfaces" --input opMode=true
+
+# Apply secret-bearing config (e.g. a WireGuard private key) with the
+# secret fields vaulted instead of stored in cleartext (see "Sensitive output")
+swamp vault create local_encryption vyos          # one-time
+swamp model method run my-router apply --input sensitive=true \
+  --input set='["interfaces wireguard wg0 private-key s3cr3t"]'
 ```
 
 ## Methods
 
 - **`show`** — run an op-mode command (default `show configuration commands`)
-  and snapshot the output to the `config` resource.
+  and snapshot the raw output to the `config` resource.
+- **`tree`** — read the running config as a **structured** tree via native
+  `show configuration json`, so it can be queried with CEL (e.g.
+  `…attributes.interfaces.ethernet`). Writes the `configTree` resource (or
+  `sensitiveConfigTree` when `sensitive=true` — the tree embeds WireGuard and
+  PKI private keys, so it is secret-bearing by nature). Well-known top-level
+  sections are declared; unknown ones are preserved.
 - **`apply`** — apply `set`/`delete` config paths through `vbash`, then `commit`
-  and `save` (both toggleable). Requires at least one `set` or `delete`.
+  and `save` (both toggleable). Requires at least one `set` or `delete`. Pass
+  `dryRun=true` to stage and print the diff without committing,
+  `storeScript=true` to persist the generated script, and `sensitive=true` to
+  vault the secret-bearing fields (see below).
+- **`diff`** — **read-only** preview of what a `set`/`delete` would change. It
+  stages the change, runs VyOS `compare`, and discards the session — it never
+  commits. Writes the `compare` output to the `diff` resource (or
+  `sensitiveDiff` when `sensitive=true`). Requires at least one `set` or
+  `delete`.
 - **`run`** — run an arbitrary command over SSH; set `opMode=true` to prefix the
   VyOS op-mode wrapper.
+
+## Sensitive output
+
+By default an `apply` result stores `stdout`/`stderr` in cleartext and redacts
+the generated script. When a change carries secrets (WireGuard/PKI private keys,
+pre-shared keys), pass `sensitive=true`. The result is then written to the
+`sensitiveApplyResult` spec, where the secret-bearing fields (`set`, `delete`,
+`script`, `stdout`, `stderr`) are marked sensitive: their values are stored in a
+vault named **`vyos`** and replaced with `${{ vault.get('vyos', …) }}`
+references at persist time. Operational fields (`host`, `changed`, `committed`,
+`exitCode`, …) stay in cleartext so the record is still glanceable.
+
+Create the vault once before using the flag:
+
+```sh
+swamp vault create local_encryption vyos
+```
+
+`local_encryption` is a built-in, dependency-free AES-GCM backend; any other
+configured vault type works too — just name it `vyos`. Without a `vyos` vault
+configured, a `sensitive=true` apply fails at persist time.
+
+`diff` takes the same `sensitive=true` flag (its `compare` output echoes the
+staged `set` lines, which can include keys) — it writes to the `sensitiveDiff`
+spec with `set`/`delete`/`diff`/`stderr` vaulted.
+
+`tree` also takes `sensitive=true`. Because the full config tree is secret-laden
+throughout, the sensitive variant vaults the **entire** record
+(`sensitiveConfigTree`, `sensitiveOutput: true`) rather than selected fields.
 
 ## How it works
 
@@ -56,7 +112,11 @@ resolve; op-mode reads use `/opt/vyatta/bin/vyatta-op-cmd-wrapper`.
 **Prerequisites:** the host running swamp must reach the router over SSH with
 key/agent auth (the model uses `BatchMode=yes` — no interactive prompts). Set
 `identityFile` in the global arguments to pin a specific key, or rely on your
-SSH agent / `~/.ssh/config`.
+SSH agent / `~/.ssh/config`. When `identityFile` is set the model also passes
+`IdentitiesOnly=yes`, so only that key is offered — this avoids tripping the
+router's `MaxAuthTries` when your agent holds many keys (a common cause of "Too
+many authentication failures"). The agent is still used to sign if it holds the
+key.
 
 **Note:** a `commit` on a router you are actively routing through can briefly
 bounce `dhclient`, so an `apply` call may take a while to return.

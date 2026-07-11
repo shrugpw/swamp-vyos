@@ -176,6 +176,35 @@ const CommandResultSchema = z.object({
   ranAt: z.iso.datetime(),
 });
 
+/** A single advertised prefix under a router-advert interface. */
+const RaPrefixSchema = z.object({
+  prefix: z.string(),
+  validLifetime: z.union([z.number().int(), z.literal("infinity")]).optional(),
+  preferredLifetime: z.union([z.number().int(), z.literal("infinity")])
+    .optional(),
+  autonomousFlag: z.boolean().optional().describe(
+    "false emits VyOS `no-autonomous-flag`",
+  ),
+  onLinkFlag: z.boolean().optional().describe(
+    "false emits VyOS `no-on-link-flag`",
+  ),
+});
+
+/**
+ * Typed router-advert (IPv6 RA / SLAAC) config for one interface — the first
+ * per-resource model on top of the raw config transport.
+ */
+const RouterAdvertSchema = z.object({
+  host: z.string(),
+  interface: z.string(),
+  exists: z.boolean().describe("Whether RA is configured on the interface"),
+  defaultLifetime: z.union([z.number().int(), z.string()]).optional(),
+  prefixes: z.array(RaPrefixSchema).default([]),
+  routes: z.array(z.string()).default([]),
+  nat64prefixes: z.array(z.string()).default([]),
+  retrievedAt: z.iso.datetime(),
+});
+
 /** Result of a single SSH invocation. */
 export interface SshResult {
   stdout: string;
@@ -304,16 +333,28 @@ export function buildConfigScript(opts: ConfigScriptOptions): string {
   }
   for (const s of opts.sets) lines.push(`set ${s}`);
   lines.push("if cli-shell-api sessionChanged; then");
+  // Staged operations can still be a NET no-op — e.g. a reconcile that deletes
+  // an interface subtree and re-sets it to the same values. `compare` reflects
+  // the true working-vs-active diff, so gate the commit on it; otherwise an
+  // already-correct apply would spuriously commit (and misreport `changed`).
+  lines.push('  __cmp="$(compare)"');
+  lines.push(
+    '  if echo "$__cmp" | grep -q "No changes between working and active"; then',
+  );
+  lines.push(`    echo ${SENTINEL_NOCHANGE}`);
+  lines.push("    exit discard");
+  lines.push("  else");
   if (opts.dryRun) {
-    lines.push("  compare");
-    lines.push(`  echo ${SENTINEL_CHANGED}`);
-    lines.push("  exit discard");
+    lines.push('    echo "$__cmp"');
+    lines.push(`    echo ${SENTINEL_CHANGED}`);
+    lines.push("    exit discard");
   } else {
-    if (opts.commit) lines.push("  commit");
-    if (opts.save) lines.push("  save");
-    lines.push(`  echo ${SENTINEL_CHANGED}`);
-    lines.push(opts.commit ? "  exit" : "  exit discard");
+    if (opts.commit) lines.push("    commit");
+    if (opts.save) lines.push("    save");
+    lines.push(`    echo ${SENTINEL_CHANGED}`);
+    lines.push(opts.commit ? "    exit" : "    exit discard");
   }
+  lines.push("  fi");
   lines.push("else");
   lines.push(`  echo ${SENTINEL_NOCHANGE}`);
   lines.push("  exit");
@@ -334,6 +375,101 @@ export function extractDiff(stdout: string): string {
     })
     .join("\n")
     .replace(/\s+$/, "");
+}
+
+/** Desired router-advert state for one interface (subset of RouterAdvertSchema). */
+export interface RouterAdvertDesired {
+  defaultLifetime?: number | string;
+  prefixes?: Array<{
+    prefix: string;
+    validLifetime?: number | "infinity";
+    preferredLifetime?: number | "infinity";
+    autonomousFlag?: boolean;
+    onLinkFlag?: boolean;
+  }>;
+  routes?: string[];
+  nat64prefixes?: string[];
+}
+
+/**
+ * Translate a desired router-advert state into the VyOS `set` paths for one
+ * interface (bare paths, no leading `set`). Paired with a delete of the whole
+ * `service router-advert interface <if>` subtree, this reconciles the interface
+ * to exactly the desired state.
+ */
+export function routerAdvertSetPaths(
+  iface: string,
+  desired: RouterAdvertDesired,
+): string[] {
+  const base = `service router-advert interface ${iface}`;
+  const paths: string[] = [];
+  if (
+    desired.defaultLifetime !== undefined && desired.defaultLifetime !== null
+  ) {
+    paths.push(`${base} default-lifetime ${desired.defaultLifetime}`);
+  }
+  for (const p of desired.prefixes ?? []) {
+    const pp = `${base} prefix ${p.prefix}`;
+    paths.push(pp);
+    if (p.validLifetime !== undefined) {
+      paths.push(`${pp} valid-lifetime ${p.validLifetime}`);
+    }
+    if (p.preferredLifetime !== undefined) {
+      paths.push(`${pp} preferred-lifetime ${p.preferredLifetime}`);
+    }
+    if (p.autonomousFlag === false) paths.push(`${pp} no-autonomous-flag`);
+    if (p.onLinkFlag === false) paths.push(`${pp} no-on-link-flag`);
+  }
+  for (const r of desired.routes ?? []) paths.push(`${base} route ${r}`);
+  for (const n of desired.nat64prefixes ?? []) {
+    paths.push(`${base} nat64prefix ${n}`);
+  }
+  return paths;
+}
+
+/**
+ * Parse one interface's node from `show configuration json`
+ * (service.router-advert.interface[<if>]) into the typed router-advert shape.
+ */
+export function parseRouterAdvertInterface(
+  node: Record<string, unknown> | undefined,
+): Omit<RouterAdvertDesired, never> & {
+  prefixes: NonNullable<RouterAdvertDesired["prefixes"]>;
+  routes: string[];
+  nat64prefixes: string[];
+} {
+  const n = node ?? {};
+  const asNum = (v: unknown) =>
+    typeof v === "string" && /^\d+$/.test(v) ? Number(v) : v;
+  const prefixNode = (n.prefix ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const prefixes = Object.keys(prefixNode).map((prefix) => {
+    const opts = prefixNode[prefix] ?? {};
+    const out: NonNullable<RouterAdvertDesired["prefixes"]>[number] = {
+      prefix,
+    };
+    if (opts["valid-lifetime"] !== undefined) {
+      out.validLifetime = asNum(opts["valid-lifetime"]) as number | "infinity";
+    }
+    if (opts["preferred-lifetime"] !== undefined) {
+      out.preferredLifetime = asNum(opts["preferred-lifetime"]) as
+        | number
+        | "infinity";
+    }
+    if ("no-autonomous-flag" in opts) out.autonomousFlag = false;
+    if ("no-on-link-flag" in opts) out.onLinkFlag = false;
+    return out;
+  });
+  return {
+    defaultLifetime: n["default-lifetime"] as number | string | undefined,
+    prefixes,
+    routes: Object.keys((n.route ?? {}) as Record<string, unknown>),
+    nat64prefixes: Object.keys(
+      (n.nat64prefix ?? {}) as Record<string, unknown>,
+    ),
+  };
 }
 
 /** Minimal LogTape logger surface used by this model. */
@@ -369,7 +505,7 @@ interface ExecuteResult {
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.10.5",
+  version: "2026.07.10.6",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,
@@ -430,13 +566,20 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 50,
     },
+    "routerAdvert": {
+      description:
+        "Typed IPv6 router-advert (RA/SLAAC) config for one interface",
+      schema: RouterAdvertSchema,
+      lifetime: "infinite",
+      garbageCollection: 30,
+    },
   },
   checks: {
     "reachable": {
       description:
         "Verify the router's config mode is reachable over SSH before applying.",
       labels: ["live"],
-      appliesTo: ["apply", "diff"],
+      appliesTo: ["apply", "diff", "ensureRouterAdvert", "removeRouterAdvert"],
       execute: async (context: CheckContext): Promise<
         { pass: boolean; errors?: string[] }
       > => {
@@ -802,6 +945,241 @@ export const model = {
           );
         }
         context.logger.info("run on {host} complete", { host: cfg.host });
+        return { dataHandles: [handle] };
+      },
+    },
+    syncRouterAdvert: {
+      description:
+        "Read the current router-advert (RA/SLAAC) config for one interface into a typed routerAdvert resource.",
+      arguments: z.object({
+        interface: z.string().describe("Interface name, e.g. br10.95"),
+      }),
+      execute: async (
+        args: { interface: string; _ssh?: SshRunner },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        context.logger.info("Reading router-advert for {iface} on {host}", {
+          iface: args.interface,
+          host: cfg.host,
+        });
+        const result = await ssh(cfg, {
+          command: [OP_WRAPPER, "show", "configuration", "json"],
+        });
+        if (result.code !== 0) {
+          context.logger.error(
+            "syncRouterAdvert failed on {host} (exit {code})",
+            { host: cfg.host, code: result.code },
+          );
+          throw new Error(
+            `syncRouterAdvert failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(result.stdout);
+        } catch (e) {
+          throw new Error(
+            `syncRouterAdvert: could not parse config json from ${cfg.host}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+        // deno-lint-ignore no-explicit-any
+        const service = (parsed.service ?? {}) as Record<string, any>;
+        // deno-lint-ignore no-explicit-any
+        const raRoot = (service["router-advert"] ?? {}) as Record<string, any>;
+        const ifNode = ((raRoot.interface ?? {}) as Record<
+          string,
+          Record<string, unknown>
+        >)[args.interface];
+        const ra = parseRouterAdvertInterface(ifNode);
+        const handle = await context.writeResource(
+          "routerAdvert",
+          args.interface,
+          {
+            host: cfg.host,
+            interface: args.interface,
+            exists: ifNode !== undefined,
+            defaultLifetime: ra.defaultLifetime,
+            prefixes: ra.prefixes,
+            routes: ra.routes,
+            nat64prefixes: ra.nat64prefixes,
+            retrievedAt: new Date().toISOString(),
+          },
+        );
+        context.logger.info(
+          "router-advert for {iface}: exists={exists}, {n} prefix(es)",
+          {
+            iface: args.interface,
+            exists: ifNode !== undefined,
+            n: ra.prefixes.length,
+          },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    ensureRouterAdvert: {
+      description:
+        "Declaratively set the router-advert config for one interface: reconciles to exactly the desired state (stale entries removed), idempotent.",
+      arguments: z.object({
+        interface: z.string(),
+        defaultLifetime: z.union([z.number().int(), z.string()]).optional(),
+        prefixes: z.array(RaPrefixSchema).default([]),
+        routes: z.array(z.string()).default([]),
+        nat64prefixes: z.array(z.string()).default([]),
+        commit: z.boolean().default(true),
+        save: z.boolean().default(true),
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe("Preview the diff without committing"),
+      }),
+      execute: async (
+        args: {
+          interface: string;
+          defaultLifetime?: number | string;
+          prefixes: NonNullable<RouterAdvertDesired["prefixes"]>;
+          routes: string[];
+          nat64prefixes: string[];
+          commit: boolean;
+          save: boolean;
+          dryRun: boolean;
+          _ssh?: SshRunner;
+        },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        const sets = routerAdvertSetPaths(args.interface, args);
+        if (sets.length === 0) {
+          throw new Error(
+            "ensureRouterAdvert requires at least one prefix, route, or nat64prefix (use removeRouterAdvert to clear)",
+          );
+        }
+        // Reconcile: wipe the interface's RA subtree, then set desired -> the
+        // interface ends up as exactly `sets`. Net-zero change is a no-op.
+        const deletes = [`service router-advert interface ${args.interface}`];
+        validateApplyPaths(sets, deletes);
+        const script = buildConfigScript({
+          sets,
+          deletes,
+          commit: args.commit,
+          save: args.save,
+          dryRun: args.dryRun,
+        });
+        context.logger.info(
+          "Ensuring router-advert for {iface} on {host} ({n} set path(s), dryRun={dryRun})",
+          {
+            iface: args.interface,
+            host: cfg.host,
+            n: sets.length,
+            dryRun: args.dryRun,
+          },
+        );
+        const result = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: script,
+        });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const committed = args.commit && changed && !args.dryRun;
+        const handle = await context.writeResource("applyResult", "last", {
+          host: cfg.host,
+          set: sets,
+          delete: deletes,
+          dryRun: args.dryRun,
+          changed,
+          committed,
+          saved: committed && args.save,
+          script: SCRIPT_REDACTED,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.code,
+          appliedAt: new Date().toISOString(),
+        });
+        if (result.code !== 0) {
+          context.logger.error(
+            "ensureRouterAdvert failed on {host} (exit {code})",
+            { host: cfg.host, code: result.code },
+          );
+          throw new Error(
+            `ensureRouterAdvert failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        context.logger.info(
+          "ensureRouterAdvert for {iface} complete (changed={changed}, committed={committed})",
+          { iface: args.interface, changed, committed },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    removeRouterAdvert: {
+      description: "Delete all router-advert config for one interface.",
+      arguments: z.object({
+        interface: z.string(),
+        commit: z.boolean().default(true),
+        save: z.boolean().default(true),
+        dryRun: z.boolean().default(false),
+      }),
+      execute: async (
+        args: {
+          interface: string;
+          commit: boolean;
+          save: boolean;
+          dryRun: boolean;
+          _ssh?: SshRunner;
+        },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        const deletes = [`service router-advert interface ${args.interface}`];
+        validateApplyPaths([], deletes);
+        const script = buildConfigScript({
+          sets: [],
+          deletes,
+          commit: args.commit,
+          save: args.save,
+          dryRun: args.dryRun,
+        });
+        context.logger.info(
+          "Removing router-advert for {iface} on {host} (dryRun={dryRun})",
+          { iface: args.interface, host: cfg.host, dryRun: args.dryRun },
+        );
+        const result = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: script,
+        });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const committed = args.commit && changed && !args.dryRun;
+        const handle = await context.writeResource("applyResult", "last", {
+          host: cfg.host,
+          set: [],
+          delete: deletes,
+          dryRun: args.dryRun,
+          changed,
+          committed,
+          saved: committed && args.save,
+          script: SCRIPT_REDACTED,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.code,
+          appliedAt: new Date().toISOString(),
+        });
+        if (result.code !== 0) {
+          context.logger.error(
+            "removeRouterAdvert failed on {host} (exit {code})",
+            { host: cfg.host, code: result.code },
+          );
+          throw new Error(
+            `removeRouterAdvert failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        context.logger.info(
+          "removeRouterAdvert for {iface} complete (changed={changed}, committed={committed})",
+          { iface: args.interface, changed, committed },
+        );
         return { dataHandles: [handle] };
       },
     },

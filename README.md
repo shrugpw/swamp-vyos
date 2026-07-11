@@ -8,7 +8,8 @@ so callers work in terms of plain config paths instead of `vbash` incantations.
 VyOS is peculiar: configuration mode requires `vbash` sourcing the Vyatta
 `script-template` (a plain `ssh host 'configure; set ...'` does **not** work),
 and operational reads go through the `vyatta-op-cmd-wrapper`. This model hides
-both requirements behind five methods.
+both requirements behind a set of raw-config methods plus typed, declarative
+per-resource methods (starting with router-advert).
 
 ## Installation
 
@@ -71,6 +72,32 @@ swamp model method run my-router apply --input sensitive=true \
   `delete`.
 - **`run`** — run an arbitrary command over SSH; set `opMode=true` to prefix the
   VyOS op-mode wrapper.
+
+### Typed resources
+
+On top of the raw config methods, the model exposes **typed, declarative**
+methods for specific VyOS resources. The first is IPv6 **router-advert** (RA /
+SLAAC):
+
+- **`syncRouterAdvert`** — read the current RA config for one interface into a
+  typed `routerAdvert` resource (`prefixes`, `routes`, `nat64prefixes`,
+  `defaultLifetime`, `exists`).
+- **`ensureRouterAdvert`** — declaratively set the RA config for one interface.
+  It reconciles to **exactly** the desired state (wipes the interface's RA
+  subtree, then sets the desired paths in one session), so stale entries are
+  removed and re-running with the same input is a true no-op (`changed=false`).
+  Supports `dryRun`.
+- **`removeRouterAdvert`** — delete all RA config for one interface.
+
+```sh
+# Declaratively pin an interface to a single 0bed prefix + default route
+# (removes any stale prefixes, e.g. a leftover ::/64) — preview first:
+swamp model method run my-router ensureRouterAdvert --input interface=br10.95 \
+  --input prefixes='[{"prefix":"2001:db8:bed:95::/64"}]' \
+  --input routes='["::/0"]' --input dryRun=true
+
+swamp model method run my-router syncRouterAdvert --input interface=br10.95
+```
 
 ## Sensitive output
 

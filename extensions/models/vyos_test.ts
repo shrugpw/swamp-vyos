@@ -17,6 +17,8 @@ import {
   buildConfigScript,
   extractDiff,
   model,
+  parseRouterAdvertInterface,
+  routerAdvertSetPaths,
   type SshResult,
   type SshRunner,
   validateApplyPaths,
@@ -81,6 +83,12 @@ const runExec = (model.methods.run.execute) as any;
 const diffExec = (model.methods.diff.execute) as any;
 // deno-lint-ignore no-explicit-any
 const treeExec = (model.methods.tree.execute) as any;
+// deno-lint-ignore no-explicit-any
+const syncRaExec = (model.methods.syncRouterAdvert.execute) as any;
+// deno-lint-ignore no-explicit-any
+const ensureRaExec = (model.methods.ensureRouterAdvert.execute) as any;
+// deno-lint-ignore no-explicit-any
+const removeRaExec = (model.methods.removeRouterAdvert.execute) as any;
 
 // --- validateApplyPaths -----------------------------------------------------
 
@@ -146,7 +154,7 @@ Deno.test("buildConfigScript commits and saves only under sessionChanged", () =>
   assert(script.includes("SWAMP_APPLY_NOCHANGE"));
 });
 
-Deno.test("buildConfigScript dryRun compares and discards, never commits", () => {
+Deno.test("buildConfigScript dryRun compares (net) and discards, never commits", () => {
   const script = buildConfigScript({
     sets: ["interface eth0 description test"],
     deletes: [],
@@ -154,10 +162,29 @@ Deno.test("buildConfigScript dryRun compares and discards, never commits", () =>
     save: true,
     dryRun: true,
   });
-  assert(script.includes("  compare"));
-  assert(script.includes("  exit discard"));
-  assert(!script.includes("\n  commit"));
-  assert(!script.includes("\n  save"));
+  // gates on the real compare diff, echoes it, never commits/saves
+  assert(script.includes('__cmp="$(compare)"'));
+  assert(script.includes("No changes between working and active"));
+  assert(script.includes('echo "$__cmp"'));
+  assert(script.includes("exit discard"));
+  assert(!script.includes("commit"));
+  assert(!script.includes("\n    save"));
+});
+
+Deno.test("buildConfigScript treats a net-zero staged change as no-op", () => {
+  // reconcile pattern: delete a subtree then re-set it identically
+  const script = buildConfigScript({
+    sets: ["service router-advert interface br0 prefix ::/64"],
+    deletes: ["service router-advert interface br0"],
+    commit: true,
+    save: true,
+    dryRun: false,
+  });
+  // the "No changes" branch discards + reports NOCHANGE before committing
+  const idx = script.indexOf("No changes between working and active");
+  const commitIdx = script.indexOf("commit");
+  assert(idx !== -1 && idx < commitIdx);
+  assert(script.includes(`${"SWAMP_APPLY_NOCHANGE"}`));
 });
 
 Deno.test("buildConfigScript discards the session when commit=false", () => {
@@ -621,6 +648,167 @@ Deno.test("diff writes the result BEFORE throwing on nonzero exit", async () => 
   );
   assertEquals(writes.length, 1);
   assertEquals(writes[0].data.exitCode, 1);
+});
+
+// --- router-advert helpers --------------------------------------------------
+
+Deno.test("routerAdvertSetPaths translates prefixes, routes, options", () => {
+  const paths = routerAdvertSetPaths("br10.95", {
+    defaultLifetime: 3600,
+    prefixes: [
+      {
+        prefix: "2602:f4fb:bed:95::/64",
+        validLifetime: 14400,
+        autonomousFlag: false,
+      },
+    ],
+    routes: ["::/0"],
+    nat64prefixes: ["64:ff9b::/96"],
+  });
+  assertEquals(paths, [
+    "service router-advert interface br10.95 default-lifetime 3600",
+    "service router-advert interface br10.95 prefix 2602:f4fb:bed:95::/64",
+    "service router-advert interface br10.95 prefix 2602:f4fb:bed:95::/64 valid-lifetime 14400",
+    "service router-advert interface br10.95 prefix 2602:f4fb:bed:95::/64 no-autonomous-flag",
+    "service router-advert interface br10.95 route ::/0",
+    "service router-advert interface br10.95 nat64prefix 64:ff9b::/96",
+  ]);
+});
+
+Deno.test("parseRouterAdvertInterface reads the json node", () => {
+  const parsed = parseRouterAdvertInterface({
+    "default-lifetime": "3600",
+    "prefix": { "2602:f4fb:bed:95::/64": {} },
+    "route": { "::/0": {} },
+    "nat64prefix": { "64:ff9b::/96": {} },
+  });
+  assertEquals(parsed.defaultLifetime, "3600");
+  assertEquals(parsed.prefixes, [{ prefix: "2602:f4fb:bed:95::/64" }]);
+  assertEquals(parsed.routes, ["::/0"]);
+  assertEquals(parsed.nat64prefixes, ["64:ff9b::/96"]);
+});
+
+// --- syncRouterAdvert -------------------------------------------------------
+
+Deno.test("syncRouterAdvert writes a typed routerAdvert resource named for the interface", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await syncRaExec(
+    {
+      interface: "br10.95",
+      _ssh: stubSsh({
+        stdout: JSON.stringify({
+          service: {
+            "router-advert": {
+              interface: {
+                "br10.95": {
+                  prefix: { "2602:f4fb:bed:95::/64": {} },
+                  route: { "::/0": {} },
+                },
+              },
+            },
+          },
+        }),
+      }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].specName, "routerAdvert");
+  assertEquals(writes[0].name, "br10.95");
+  assertEquals(writes[0].data.exists, true);
+  assertEquals(writes[0].data.prefixes, [{ prefix: "2602:f4fb:bed:95::/64" }]);
+  assertEquals(writes[0].data.routes, ["::/0"]);
+});
+
+Deno.test("syncRouterAdvert reports exists=false for an unconfigured interface", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await syncRaExec(
+    {
+      interface: "eth9",
+      _ssh: stubSsh({ stdout: '{"service":{}}' }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].data.exists, false);
+  assertEquals(writes[0].data.prefixes, []);
+});
+
+// --- ensureRouterAdvert -----------------------------------------------------
+
+Deno.test("ensureRouterAdvert wipes the subtree then sets desired (declarative)", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await ensureRaExec(
+    {
+      interface: "br10.95",
+      prefixes: [{ prefix: "2602:f4fb:bed:95::/64" }],
+      routes: ["::/0"],
+      nat64prefixes: [],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  const script = String(calls[0].stdin);
+  // deletes the whole interface subtree first, then re-sets the desired paths
+  assert(
+    script.includes(
+      "if cli-shell-api existsActive service router-advert interface br10.95; then delete service router-advert interface br10.95",
+    ),
+  );
+  assert(
+    script.includes(
+      "set service router-advert interface br10.95 prefix 2602:f4fb:bed:95::/64",
+    ),
+  );
+  assertEquals(writes[0].specName, "applyResult");
+  assertEquals(writes[0].data.changed, true);
+  assertEquals(writes[0].data.committed, true);
+});
+
+Deno.test("ensureRouterAdvert requires at least one prefix/route/nat64prefix", async () => {
+  const { context } = fakeContext();
+  await assertRejects(
+    () =>
+      ensureRaExec({
+        interface: "br10.95",
+        prefixes: [],
+        routes: [],
+        nat64prefixes: [],
+        commit: true,
+        save: true,
+        dryRun: false,
+      }, context),
+    Error,
+    "at least one",
+  );
+});
+
+// --- removeRouterAdvert -----------------------------------------------------
+
+Deno.test("removeRouterAdvert deletes the interface subtree, no sets", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await removeRaExec(
+    {
+      interface: "br0",
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  const script = String(calls[0].stdin);
+  assert(script.includes("delete service router-advert interface br0"));
+  assert(!script.includes("\nset "));
+  assertEquals(writes[0].data.delete, [
+    "service router-advert interface br0",
+  ]);
+  assertEquals(writes[0].data.set, []);
 });
 
 // --- run --------------------------------------------------------------------

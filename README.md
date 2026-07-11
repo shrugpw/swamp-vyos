@@ -89,6 +89,23 @@ SLAAC):
   Supports `dryRun`.
 - **`removeRouterAdvert`** — delete all RA config for one interface.
 
+**WireGuard** (`syncWireguard` / `ensureWireguard` / `removeWireguard`) manages
+one `interfaces wireguard <if>` — address/port/mtu, `ipv6 adjust-mss`, and peers
+(public-key, endpoint address/port, allowed-ips, keepalive, preshared-key). It
+is **secret-bearing** (interface `private-key`, per-peer `preshared-key`), so
+the whole `wireguard` resource is vaulted (`sensitiveOutput`, `vyos` vault) and
+`ensure`/`remove` write their result to the vaulted `sensitiveApplyResult`. A
+`vyos` vault must be configured. `ensureWireguard` reconciles declaratively like
+`ensureRouterAdvert` (idempotent).
+
+**Interface** (`syncInterface` / `ensureInterface`) manages the **scoped** L3
+attributes of one `interfaces <type> <name>` — `address` (list, reconciled),
+`description`, `mtu`, `disable`. It is deliberately scoped: `ensureInterface`
+**never wipes the interface subtree**, so bridge members, `hw-id`, `vif`,
+firewall assignments, etc. are left untouched (it reads current state to
+reconcile only the address list). Full interface removal is intentionally left
+to raw `apply --delete` rather than a typed method.
+
 ```sh
 # Declaratively pin an interface to a single 0bed prefix + default route
 # (removes any stale prefixes, e.g. a leftover ::/64) — preview first:

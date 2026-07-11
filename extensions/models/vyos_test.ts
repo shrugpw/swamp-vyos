@@ -16,12 +16,16 @@ import {
 import {
   buildConfigScript,
   extractDiff,
+  interfaceReconcile,
   model,
+  parseInterfaceNode,
   parseRouterAdvertInterface,
+  parseWireguardInterface,
   routerAdvertSetPaths,
   type SshResult,
   type SshRunner,
   validateApplyPaths,
+  wireguardSetPaths,
 } from "./vyos.ts";
 
 /** A recorded call to the injected SSH runner. */
@@ -89,6 +93,16 @@ const syncRaExec = (model.methods.syncRouterAdvert.execute) as any;
 const ensureRaExec = (model.methods.ensureRouterAdvert.execute) as any;
 // deno-lint-ignore no-explicit-any
 const removeRaExec = (model.methods.removeRouterAdvert.execute) as any;
+// deno-lint-ignore no-explicit-any
+const syncWgExec = (model.methods.syncWireguard.execute) as any;
+// deno-lint-ignore no-explicit-any
+const ensureWgExec = (model.methods.ensureWireguard.execute) as any;
+// deno-lint-ignore no-explicit-any
+const removeWgExec = (model.methods.removeWireguard.execute) as any;
+// deno-lint-ignore no-explicit-any
+const syncIfExec = (model.methods.syncInterface.execute) as any;
+// deno-lint-ignore no-explicit-any
+const ensureIfExec = (model.methods.ensureInterface.execute) as any;
 
 // --- validateApplyPaths -----------------------------------------------------
 
@@ -809,6 +823,316 @@ Deno.test("removeRouterAdvert deletes the interface subtree, no sets", async () 
     "service router-advert interface br0",
   ]);
   assertEquals(writes[0].data.set, []);
+});
+
+// --- wireguard helpers ------------------------------------------------------
+
+Deno.test("wireguardSetPaths translates interface + peer paths", () => {
+  const paths = wireguardSetPaths("wg0", {
+    privateKey: "PRIV=",
+    address: ["2001:db8:e::1/126"],
+    port: 51821,
+    adjustMss: "clamp-mss-to-pmtu",
+    peers: [
+      {
+        name: "hub",
+        publicKey: "PUB=",
+        address: "203.0.113.1",
+        port: 51820,
+        allowedIps: ["::/0"],
+        persistentKeepalive: 25,
+        presharedKey: "PSK=",
+      },
+    ],
+  });
+  assertEquals(paths, [
+    "interfaces wireguard wg0 private-key PRIV=",
+    "interfaces wireguard wg0 address 2001:db8:e::1/126",
+    "interfaces wireguard wg0 port 51821",
+    "interfaces wireguard wg0 ipv6 adjust-mss clamp-mss-to-pmtu",
+    "interfaces wireguard wg0 peer hub public-key PUB=",
+    "interfaces wireguard wg0 peer hub address 203.0.113.1",
+    "interfaces wireguard wg0 peer hub port 51820",
+    "interfaces wireguard wg0 peer hub allowed-ips ::/0",
+    "interfaces wireguard wg0 peer hub persistent-keepalive 25",
+    "interfaces wireguard wg0 peer hub preshared-key PSK=",
+  ]);
+});
+
+Deno.test("wireguardSetPaths quotes a spaced description", () => {
+  const paths = wireguardSetPaths("wg0", { description: "uplink to hub" });
+  assertEquals(paths, [
+    "interfaces wireguard wg0 description 'uplink to hub'",
+  ]);
+});
+
+Deno.test("parseWireguardInterface reads interface + peers", () => {
+  const parsed = parseWireguardInterface({
+    "address": ["2001:db8:e::1/126"],
+    "port": "51821",
+    "private-key": "PRIV=",
+    "ipv6": { "adjust-mss": "clamp-mss-to-pmtu" },
+    "peer": {
+      "hub": {
+        "address": "203.0.113.1",
+        "port": "51820",
+        "public-key": "PUB=",
+        "allowed-ips": ["::/0"],
+        "persistent-keepalive": "25",
+      },
+    },
+  });
+  assertEquals(parsed.privateKey, "PRIV=");
+  assertEquals(parsed.address, ["2001:db8:e::1/126"]);
+  assertEquals(parsed.adjustMss, "clamp-mss-to-pmtu");
+  assertEquals(parsed.peers.length, 1);
+  assertEquals(parsed.peers[0].name, "hub");
+  assertEquals(parsed.peers[0].publicKey, "PUB=");
+  assertEquals(parsed.peers[0].allowedIps, ["::/0"]);
+});
+
+// --- syncWireguard ----------------------------------------------------------
+
+Deno.test("syncWireguard writes the vaulted wireguard resource per interface", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await syncWgExec(
+    {
+      interface: "wg0",
+      _ssh: stubSsh({
+        stdout: JSON.stringify({
+          interfaces: {
+            wireguard: {
+              wg0: {
+                "private-key": "PRIV=",
+                "port": "51821",
+                "peer": { "hub": { "public-key": "PUB=" } },
+              },
+            },
+          },
+        }),
+      }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].specName, "wireguard");
+  assertEquals(writes[0].name, "wg0");
+  assertEquals(writes[0].data.exists, true);
+  assertEquals(writes[0].data.privateKey, "PRIV=");
+  assertEquals(
+    (writes[0].data.peers as Array<{ name: string }>)[0].name,
+    "hub",
+  );
+});
+
+// --- ensureWireguard / removeWireguard --------------------------------------
+
+Deno.test("ensureWireguard reconciles and vaults the result", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await ensureWgExec(
+    {
+      interface: "wg0",
+      privateKey: "PRIV=",
+      address: ["2001:db8:e::1/126"],
+      port: 51821,
+      peers: [{ name: "hub", publicKey: "PUB=", allowedIps: ["::/0"] }],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  const script = String(calls[0].stdin);
+  assert(
+    script.includes(
+      "if cli-shell-api existsActive interfaces wireguard wg0; then delete interfaces wireguard wg0",
+    ),
+  );
+  assert(script.includes("set interfaces wireguard wg0 private-key PRIV="));
+  // WireGuard results are vaulted
+  assertEquals(writes[0].specName, "sensitiveApplyResult");
+});
+
+Deno.test("ensureWireguard requires at least one field", async () => {
+  const { context } = fakeContext();
+  await assertRejects(
+    () =>
+      ensureWgExec({
+        interface: "wg0",
+        address: [],
+        peers: [],
+        commit: true,
+        save: true,
+        dryRun: false,
+      }, context),
+    Error,
+    "at least one",
+  );
+});
+
+Deno.test("removeWireguard deletes the interface, vaults the result", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await removeWgExec(
+    {
+      interface: "wg0",
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  assert(String(calls[0].stdin).includes("delete interfaces wireguard wg0"));
+  assertEquals(writes[0].specName, "sensitiveApplyResult");
+  assertEquals(writes[0].data.delete, ["interfaces wireguard wg0"]);
+});
+
+// --- interface helpers ------------------------------------------------------
+
+Deno.test("parseInterfaceNode reads address/description/mtu/disable", () => {
+  const st = parseInterfaceNode({
+    address: ["10.0.0.1/24"],
+    description: "x",
+    mtu: "1500",
+    disable: {},
+  });
+  assertEquals(st.address, ["10.0.0.1/24"]);
+  assertEquals(st.disable, true);
+  const empty = parseInterfaceNode(undefined);
+  assertEquals(empty.address, []);
+  assertEquals(empty.disable, false);
+});
+
+Deno.test("interfaceReconcile reconciles addresses + sets scalars, nothing else", () => {
+  const { sets, deletes } = interfaceReconcile(
+    "bridge",
+    "br0",
+    { address: ["10.0.0.1/24", "10.0.0.2/24"], disable: false },
+    { address: ["10.0.0.1/24"], description: "MGMT", mtu: 1500 },
+  );
+  assertEquals(deletes, ["interfaces bridge br0 address 10.0.0.2/24"]);
+  assert(sets.includes("interfaces bridge br0 address 10.0.0.1/24"));
+  assert(sets.includes("interfaces bridge br0 description MGMT"));
+  assert(sets.includes("interfaces bridge br0 mtu 1500"));
+  // scoped: never emits a bare subtree delete
+  assert(!deletes.includes("interfaces bridge br0"));
+});
+
+Deno.test("interfaceReconcile clears disable only when it is active", () => {
+  assertEquals(
+    interfaceReconcile("ethernet", "eth0", { address: [], disable: true }, {
+      disable: false,
+    }).deletes,
+    ["interfaces ethernet eth0 disable"],
+  );
+  assertEquals(
+    interfaceReconcile("ethernet", "eth0", { address: [], disable: false }, {
+      disable: false,
+    }).deletes,
+    [],
+  );
+  assertEquals(
+    interfaceReconcile("ethernet", "eth0", { address: [], disable: false }, {
+      disable: true,
+    }).sets,
+    ["interfaces ethernet eth0 disable"],
+  );
+});
+
+// --- syncInterface ----------------------------------------------------------
+
+Deno.test("syncInterface writes the interface resource per name", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await syncIfExec(
+    {
+      type: "bridge",
+      interface: "br0",
+      _ssh: stubSsh({
+        stdout: JSON.stringify({
+          interfaces: {
+            bridge: {
+              br0: { address: ["10.254.1.1/24"], description: "MGMT-OOB" },
+            },
+          },
+        }),
+      }, calls),
+    },
+    context,
+  );
+  assertEquals(writes[0].specName, "interface");
+  assertEquals(writes[0].name, "br0");
+  assertEquals(writes[0].data.type, "bridge");
+  assertEquals(writes[0].data.exists, true);
+  assertEquals(writes[0].data.address, ["10.254.1.1/24"]);
+});
+
+// --- ensureInterface --------------------------------------------------------
+
+Deno.test("ensureInterface reads current, reconciles addresses, never wipes the subtree", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  // read (no stdin) returns current config; apply (stdin) returns the sentinel
+  const ssh: SshRunner = (_cfg, opts) => {
+    calls.push({ command: opts.command, stdin: opts.stdin });
+    if (opts.stdin !== undefined) {
+      return Promise.resolve({
+        stdout: "SWAMP_APPLY_CHANGED\n",
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve({
+      stdout: JSON.stringify({
+        interfaces: {
+          bridge: { br0: { address: ["10.0.0.1/24", "10.0.0.9/24"] } },
+        },
+      }),
+      stderr: "",
+      code: 0,
+    });
+  };
+  await ensureIfExec(
+    {
+      type: "bridge",
+      interface: "br0",
+      address: ["10.0.0.1/24"],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: ssh,
+    },
+    context,
+  );
+  const script = String(calls[1].stdin);
+  // stale 10.0.0.9 removed (guarded), desired 10.0.0.1 set
+  assert(
+    script.includes("existsActive interfaces bridge br0 address 10.0.0.9/24"),
+  );
+  assert(script.includes("set interfaces bridge br0 address 10.0.0.1/24"));
+  // safety: it must NOT delete the whole interface subtree
+  assert(!script.includes("delete interfaces bridge br0;"));
+  assert(!script.includes("delete interfaces bridge br0\n"));
+  assertEquals(writes[0].specName, "applyResult");
+});
+
+Deno.test("ensureInterface requires at least one attribute", async () => {
+  const { context } = fakeContext();
+  await assertRejects(
+    () =>
+      ensureIfExec({
+        type: "bridge",
+        interface: "br0",
+        commit: true,
+        save: true,
+        dryRun: false,
+      }, context),
+    Error,
+    "at least one",
+  );
 });
 
 // --- run --------------------------------------------------------------------

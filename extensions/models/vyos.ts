@@ -205,6 +205,57 @@ const RouterAdvertSchema = z.object({
   retrievedAt: z.iso.datetime(),
 });
 
+/** A WireGuard peer (VyOS `interfaces wireguard <if> peer <name>`). */
+const WgPeerSchema = z.object({
+  name: z.string(),
+  publicKey: z.string(),
+  address: z.string().optional().describe("Endpoint host/IP"),
+  port: z.union([z.number().int(), z.string()]).optional().describe(
+    "Endpoint port",
+  ),
+  allowedIps: z.array(z.string()).default([]),
+  persistentKeepalive: z.union([z.number().int(), z.string()]).optional(),
+  presharedKey: z.string().optional(),
+  description: z.string().optional(),
+});
+
+/**
+ * Typed WireGuard interface config. The whole resource is vaulted
+ * (`sensitiveOutput`) because it carries the interface `private-key` and per-peer
+ * `preshared-key`.
+ */
+const WireguardSchema = z.object({
+  host: z.string(),
+  interface: z.string(),
+  exists: z.boolean(),
+  privateKey: z.string().optional(),
+  address: z.array(z.string()).default([]),
+  port: z.union([z.number().int(), z.string()]).optional(),
+  mtu: z.union([z.number().int(), z.string()]).optional(),
+  adjustMss: z.string().optional().describe("ipv6 adjust-mss value"),
+  fwmark: z.union([z.number().int(), z.string()]).optional(),
+  description: z.string().optional(),
+  peers: z.array(WgPeerSchema).default([]),
+  retrievedAt: z.iso.datetime(),
+});
+
+/**
+ * Typed L3 attributes of one interface (`interfaces <type> <name>`). Scoped on
+ * purpose: only the attributes this model manages — NOT bridge members, hw-id,
+ * vif, firewall assignments, etc.
+ */
+const InterfaceSchema = z.object({
+  host: z.string(),
+  type: z.string(),
+  interface: z.string(),
+  exists: z.boolean(),
+  address: z.array(z.string()).default([]),
+  description: z.string().optional(),
+  mtu: z.union([z.number().int(), z.string()]).optional(),
+  disable: z.boolean().default(false),
+  retrievedAt: z.iso.datetime(),
+});
+
 /** Result of a single SSH invocation. */
 export interface SshResult {
   stdout: string;
@@ -472,6 +523,184 @@ export function parseRouterAdvertInterface(
   };
 }
 
+/** A desired WireGuard peer for {@link wireguardSetPaths}. */
+export interface WgPeerDesired {
+  name: string;
+  publicKey: string;
+  address?: string;
+  port?: number | string;
+  allowedIps?: string[];
+  persistentKeepalive?: number | string;
+  presharedKey?: string;
+  description?: string;
+}
+
+/** Desired WireGuard interface state for {@link wireguardSetPaths}. */
+export interface WireguardDesired {
+  privateKey?: string;
+  address?: string[];
+  port?: number | string;
+  mtu?: number | string;
+  adjustMss?: string;
+  fwmark?: number | string;
+  description?: string;
+  peers?: WgPeerDesired[];
+}
+
+/** Single-quote a value if it contains whitespace (e.g. a description). */
+function quoteIfSpaced(v: string): string {
+  return /\s/.test(v) ? `'${v}'` : v;
+}
+
+/**
+ * Translate a desired WireGuard interface state into VyOS `set` paths (bare, no
+ * leading `set`). Paired with a delete of `interfaces wireguard <if>`, this
+ * reconciles the interface to exactly the desired state.
+ */
+export function wireguardSetPaths(
+  iface: string,
+  desired: WireguardDesired,
+): string[] {
+  const base = `interfaces wireguard ${iface}`;
+  const paths: string[] = [];
+  if (desired.privateKey) {
+    paths.push(`${base} private-key ${desired.privateKey}`);
+  }
+  for (const a of desired.address ?? []) paths.push(`${base} address ${a}`);
+  if (desired.port !== undefined) paths.push(`${base} port ${desired.port}`);
+  if (desired.mtu !== undefined) paths.push(`${base} mtu ${desired.mtu}`);
+  if (desired.adjustMss !== undefined) {
+    paths.push(`${base} ipv6 adjust-mss ${desired.adjustMss}`);
+  }
+  if (desired.fwmark !== undefined) {
+    paths.push(`${base} fwmark ${desired.fwmark}`);
+  }
+  if (desired.description !== undefined) {
+    paths.push(`${base} description ${quoteIfSpaced(desired.description)}`);
+  }
+  for (const p of desired.peers ?? []) {
+    const pb = `${base} peer ${p.name}`;
+    paths.push(`${pb} public-key ${p.publicKey}`);
+    if (p.address !== undefined) paths.push(`${pb} address ${p.address}`);
+    if (p.port !== undefined) paths.push(`${pb} port ${p.port}`);
+    for (const aip of p.allowedIps ?? []) {
+      paths.push(`${pb} allowed-ips ${aip}`);
+    }
+    if (p.persistentKeepalive !== undefined) {
+      paths.push(`${pb} persistent-keepalive ${p.persistentKeepalive}`);
+    }
+    if (p.presharedKey) paths.push(`${pb} preshared-key ${p.presharedKey}`);
+    if (p.description !== undefined) {
+      paths.push(`${pb} description ${quoteIfSpaced(p.description)}`);
+    }
+  }
+  return paths;
+}
+
+/**
+ * Parse one interface's node from `show configuration json`
+ * (interfaces.wireguard[<if>]) into the typed WireGuard shape (secrets included).
+ */
+export function parseWireguardInterface(
+  node: Record<string, unknown> | undefined,
+): Omit<WireguardDesired, "peers"> & {
+  peers: WgPeerDesired[];
+  address: string[];
+} {
+  const n = (node ?? {}) as Record<string, unknown>;
+  const asArr = (v: unknown): string[] =>
+    Array.isArray(v) ? v as string[] : v === undefined ? [] : [String(v)];
+  const ipv6 = (n.ipv6 ?? {}) as Record<string, unknown>;
+  const peerNode = (n.peer ?? {}) as Record<string, Record<string, unknown>>;
+  const peers: WgPeerDesired[] = Object.keys(peerNode).map((name) => {
+    const p = peerNode[name] ?? {};
+    return {
+      name,
+      publicKey: String(p["public-key"] ?? ""),
+      address: p.address as string | undefined,
+      port: p.port as string | undefined,
+      allowedIps: asArr(p["allowed-ips"]),
+      persistentKeepalive: p["persistent-keepalive"] as string | undefined,
+      presharedKey: p["preshared-key"] as string | undefined,
+      description: p.description as string | undefined,
+    };
+  });
+  return {
+    privateKey: n["private-key"] as string | undefined,
+    address: asArr(n.address),
+    port: n.port as string | undefined,
+    mtu: n.mtu as string | undefined,
+    adjustMss: ipv6["adjust-mss"] as string | undefined,
+    fwmark: n.fwmark as string | undefined,
+    description: n.description as string | undefined,
+    peers,
+  };
+}
+
+/** Current L3 state of an interface, parsed from `show configuration json`. */
+export interface InterfaceState {
+  address: string[];
+  description?: string;
+  mtu?: number | string;
+  disable: boolean;
+}
+
+/** Desired scoped interface attributes for {@link interfaceReconcile}. */
+export interface InterfaceDesired {
+  address?: string[];
+  description?: string;
+  mtu?: number | string;
+  disable?: boolean;
+}
+
+/** Parse one interface node (interfaces.<type>.<name>) into its L3 state. */
+export function parseInterfaceNode(
+  node: Record<string, unknown> | undefined,
+): InterfaceState {
+  const n = (node ?? {}) as Record<string, unknown>;
+  const asArr = (v: unknown): string[] =>
+    Array.isArray(v) ? v as string[] : v === undefined ? [] : [String(v)];
+  return {
+    address: asArr(n.address),
+    description: n.description as string | undefined,
+    mtu: n.mtu as string | undefined,
+    disable: "disable" in n,
+  };
+}
+
+/**
+ * Compute the SCOPED set/delete paths to reconcile an interface's managed L3
+ * attributes to `desired`, given its `current` state. Only touches
+ * address/description/mtu/disable — never the rest of the interface subtree.
+ * `disable`/`description`/`mtu` left `undefined` in `desired` are not touched.
+ */
+export function interfaceReconcile(
+  type: string,
+  name: string,
+  current: InterfaceState,
+  desired: InterfaceDesired,
+): { sets: string[]; deletes: string[] } {
+  const base = `interfaces ${type} ${name}`;
+  const sets: string[] = [];
+  const deletes: string[] = [];
+  if (desired.address !== undefined) {
+    const want = new Set(desired.address);
+    for (const a of current.address) {
+      if (!want.has(a)) deletes.push(`${base} address ${a}`);
+    }
+    for (const a of desired.address) sets.push(`${base} address ${a}`);
+  }
+  if (desired.description !== undefined) {
+    sets.push(`${base} description ${quoteIfSpaced(desired.description)}`);
+  }
+  if (desired.mtu !== undefined) sets.push(`${base} mtu ${desired.mtu}`);
+  if (desired.disable === true) sets.push(`${base} disable`);
+  else if (desired.disable === false && current.disable) {
+    deletes.push(`${base} disable`);
+  }
+  return { sets, deletes };
+}
+
 /** Minimal LogTape logger surface used by this model. */
 interface Logger {
   debug: (message: string, properties?: Record<string, unknown>) => void;
@@ -505,7 +734,7 @@ interface ExecuteResult {
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.10.6",
+  version: "2026.07.10.8",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,
@@ -573,13 +802,37 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 30,
     },
+    "wireguard": {
+      description:
+        "Typed WireGuard interface config (whole record vaulted — carries private/preshared keys)",
+      schema: WireguardSchema,
+      sensitiveOutput: true,
+      vaultName: "vyos",
+      lifetime: "infinite",
+      garbageCollection: 30,
+    },
+    "interface": {
+      description:
+        "Scoped L3 attributes of one interface (address/description/mtu/disable)",
+      schema: InterfaceSchema,
+      lifetime: "infinite",
+      garbageCollection: 30,
+    },
   },
   checks: {
     "reachable": {
       description:
         "Verify the router's config mode is reachable over SSH before applying.",
       labels: ["live"],
-      appliesTo: ["apply", "diff", "ensureRouterAdvert", "removeRouterAdvert"],
+      appliesTo: [
+        "apply",
+        "diff",
+        "ensureRouterAdvert",
+        "removeRouterAdvert",
+        "ensureWireguard",
+        "removeWireguard",
+        "ensureInterface",
+      ],
       execute: async (context: CheckContext): Promise<
         { pass: boolean; errors?: string[] }
       > => {
@@ -1178,6 +1431,455 @@ export const model = {
         }
         context.logger.info(
           "removeRouterAdvert for {iface} complete (changed={changed}, committed={committed})",
+          { iface: args.interface, changed, committed },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    syncWireguard: {
+      description:
+        "Read the current WireGuard config for one interface into a typed (vaulted) wireguard resource.",
+      arguments: z.object({
+        interface: z.string().describe("WireGuard interface, e.g. wg0"),
+      }),
+      execute: async (
+        args: { interface: string; _ssh?: SshRunner },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        context.logger.info("Reading wireguard {iface} on {host}", {
+          iface: args.interface,
+          host: cfg.host,
+        });
+        const result = await ssh(cfg, {
+          command: [OP_WRAPPER, "show", "configuration", "json"],
+        });
+        if (result.code !== 0) {
+          context.logger.error("syncWireguard failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
+          throw new Error(
+            `syncWireguard failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(result.stdout);
+        } catch (e) {
+          throw new Error(
+            `syncWireguard: could not parse config json from ${cfg.host}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+        // deno-lint-ignore no-explicit-any
+        const ifaces = (parsed.interfaces ?? {}) as Record<string, any>;
+        const wgNode = ((ifaces.wireguard ?? {}) as Record<
+          string,
+          Record<string, unknown>
+        >)[args.interface];
+        const wg = parseWireguardInterface(wgNode);
+        const handle = await context.writeResource(
+          "wireguard",
+          args.interface,
+          {
+            host: cfg.host,
+            interface: args.interface,
+            exists: wgNode !== undefined,
+            privateKey: wg.privateKey,
+            address: wg.address,
+            port: wg.port,
+            mtu: wg.mtu,
+            adjustMss: wg.adjustMss,
+            fwmark: wg.fwmark,
+            description: wg.description,
+            peers: wg.peers,
+            retrievedAt: new Date().toISOString(),
+          },
+        );
+        context.logger.info(
+          "wireguard {iface}: exists={exists}, {n} peer(s)",
+          {
+            iface: args.interface,
+            exists: wgNode !== undefined,
+            n: wg.peers.length,
+          },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    ensureWireguard: {
+      description:
+        "Declaratively set the WireGuard config for one interface (reconciles to exactly the desired state; result is vaulted).",
+      arguments: z.object({
+        interface: z.string(),
+        privateKey: z.string().optional(),
+        address: z.array(z.string()).default([]),
+        port: z.union([z.number().int(), z.string()]).optional(),
+        mtu: z.union([z.number().int(), z.string()]).optional(),
+        adjustMss: z.string().optional(),
+        fwmark: z.union([z.number().int(), z.string()]).optional(),
+        description: z.string().optional(),
+        peers: z.array(WgPeerSchema).default([]),
+        commit: z.boolean().default(true),
+        save: z.boolean().default(true),
+        dryRun: z.boolean().default(false),
+      }),
+      execute: async (
+        args:
+          & WireguardDesired
+          & {
+            interface: string;
+            commit: boolean;
+            save: boolean;
+            dryRun: boolean;
+            _ssh?: SshRunner;
+          },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        const sets = wireguardSetPaths(args.interface, args);
+        if (sets.length === 0) {
+          throw new Error(
+            "ensureWireguard requires at least one field to set (use removeWireguard to clear)",
+          );
+        }
+        const deletes = [`interfaces wireguard ${args.interface}`];
+        validateApplyPaths(sets, deletes);
+        const script = buildConfigScript({
+          sets,
+          deletes,
+          commit: args.commit,
+          save: args.save,
+          dryRun: args.dryRun,
+        });
+        context.logger.info(
+          "Ensuring wireguard {iface} on {host} ({n} path(s), dryRun={dryRun})",
+          {
+            iface: args.interface,
+            host: cfg.host,
+            n: sets.length,
+            dryRun: args.dryRun,
+          },
+        );
+        const result = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: script,
+        });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const committed = args.commit && changed && !args.dryRun;
+        // The set paths + compare diff carry the private/preshared keys, so the
+        // whole result is vaulted (sensitiveApplyResult).
+        const handle = await context.writeResource(
+          "sensitiveApplyResult",
+          "last",
+          {
+            host: cfg.host,
+            set: sets,
+            delete: deletes,
+            dryRun: args.dryRun,
+            changed,
+            committed,
+            saved: committed && args.save,
+            script,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.code,
+            appliedAt: new Date().toISOString(),
+          },
+        );
+        if (result.code !== 0) {
+          context.logger.error(
+            "ensureWireguard failed on {host} (exit {code})",
+            { host: cfg.host, code: result.code },
+          );
+          throw new Error(
+            `ensureWireguard failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        context.logger.info(
+          "ensureWireguard {iface} complete (changed={changed}, committed={committed})",
+          { iface: args.interface, changed, committed },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    removeWireguard: {
+      description:
+        "Delete a WireGuard interface's config (result vaulted — the diff exposes keys).",
+      arguments: z.object({
+        interface: z.string(),
+        commit: z.boolean().default(true),
+        save: z.boolean().default(true),
+        dryRun: z.boolean().default(false),
+      }),
+      execute: async (
+        args: {
+          interface: string;
+          commit: boolean;
+          save: boolean;
+          dryRun: boolean;
+          _ssh?: SshRunner;
+        },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        const deletes = [`interfaces wireguard ${args.interface}`];
+        validateApplyPaths([], deletes);
+        const script = buildConfigScript({
+          sets: [],
+          deletes,
+          commit: args.commit,
+          save: args.save,
+          dryRun: args.dryRun,
+        });
+        context.logger.info(
+          "Removing wireguard {iface} on {host} (dryRun={dryRun})",
+          { iface: args.interface, host: cfg.host, dryRun: args.dryRun },
+        );
+        const result = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: script,
+        });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const committed = args.commit && changed && !args.dryRun;
+        const handle = await context.writeResource(
+          "sensitiveApplyResult",
+          "last",
+          {
+            host: cfg.host,
+            set: [],
+            delete: deletes,
+            dryRun: args.dryRun,
+            changed,
+            committed,
+            saved: committed && args.save,
+            script,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.code,
+            appliedAt: new Date().toISOString(),
+          },
+        );
+        if (result.code !== 0) {
+          context.logger.error(
+            "removeWireguard failed on {host} (exit {code})",
+            { host: cfg.host, code: result.code },
+          );
+          throw new Error(
+            `removeWireguard failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        context.logger.info(
+          "removeWireguard {iface} complete (changed={changed}, committed={committed})",
+          { iface: args.interface, changed, committed },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    syncInterface: {
+      description:
+        "Read the scoped L3 attributes (address/description/mtu/disable) of one interface into a typed interface resource.",
+      arguments: z.object({
+        type: z.string().describe(
+          "Interface type, e.g. ethernet, bridge, loopback, dummy",
+        ),
+        interface: z.string().describe("Interface name, e.g. br0, eth0"),
+      }),
+      execute: async (
+        args: { type: string; interface: string; _ssh?: SshRunner },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        context.logger.info("Reading interface {type} {iface} on {host}", {
+          type: args.type,
+          iface: args.interface,
+          host: cfg.host,
+        });
+        const result = await ssh(cfg, {
+          command: [OP_WRAPPER, "show", "configuration", "json"],
+        });
+        if (result.code !== 0) {
+          context.logger.error("syncInterface failed on {host} (exit {code})", {
+            host: cfg.host,
+            code: result.code,
+          });
+          throw new Error(
+            `syncInterface failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(result.stdout);
+        } catch (e) {
+          throw new Error(
+            `syncInterface: could not parse config json from ${cfg.host}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+        // deno-lint-ignore no-explicit-any
+        const ifaces = (parsed.interfaces ?? {}) as Record<string, any>;
+        const node = ((ifaces[args.type] ?? {}) as Record<
+          string,
+          Record<string, unknown>
+        >)[args.interface];
+        const st = parseInterfaceNode(node);
+        const handle = await context.writeResource(
+          "interface",
+          args.interface,
+          {
+            host: cfg.host,
+            type: args.type,
+            interface: args.interface,
+            exists: node !== undefined,
+            address: st.address,
+            description: st.description,
+            mtu: st.mtu,
+            disable: st.disable,
+            retrievedAt: new Date().toISOString(),
+          },
+        );
+        context.logger.info(
+          "interface {iface}: exists={exists}, {n} address(es)",
+          {
+            iface: args.interface,
+            exists: node !== undefined,
+            n: st.address.length,
+          },
+        );
+        return { dataHandles: [handle] };
+      },
+    },
+    ensureInterface: {
+      description:
+        "Declaratively set an interface's scoped L3 attributes (address list reconciled; description/mtu/disable set). Never touches the rest of the interface subtree (members, hw-id, vif, ...).",
+      arguments: z.object({
+        type: z.string(),
+        interface: z.string(),
+        address: z.array(z.string()).optional(),
+        description: z.string().optional(),
+        mtu: z.union([z.number().int(), z.string()]).optional(),
+        disable: z.boolean().optional(),
+        commit: z.boolean().default(true),
+        save: z.boolean().default(true),
+        dryRun: z.boolean().default(false),
+      }),
+      execute: async (
+        args:
+          & InterfaceDesired
+          & {
+            type: string;
+            interface: string;
+            commit: boolean;
+            save: boolean;
+            dryRun: boolean;
+            _ssh?: SshRunner;
+          },
+        context: ExecuteContext,
+      ): Promise<ExecuteResult> => {
+        const cfg = context.globalArgs;
+        const ssh = args._ssh ?? sshExec;
+        if (
+          args.address === undefined && args.description === undefined &&
+          args.mtu === undefined && args.disable === undefined
+        ) {
+          throw new Error(
+            "ensureInterface requires at least one of address/description/mtu/disable",
+          );
+        }
+        // Read current state so the address list can be reconciled (scoped —
+        // we never wipe the whole interface subtree).
+        const read = await ssh(cfg, {
+          command: [OP_WRAPPER, "show", "configuration", "json"],
+        });
+        if (read.code !== 0) {
+          context.logger.error(
+            "ensureInterface read failed on {host} (exit {code})",
+            { host: cfg.host, code: read.code },
+          );
+          throw new Error(
+            `ensureInterface: read config failed on ${cfg.host} (exit ${read.code}): ${read.stderr}`,
+          );
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(read.stdout);
+        } catch (e) {
+          throw new Error(
+            `ensureInterface: could not parse config json from ${cfg.host}: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+        // deno-lint-ignore no-explicit-any
+        const ifaces = (parsed.interfaces ?? {}) as Record<string, any>;
+        const node = ((ifaces[args.type] ?? {}) as Record<
+          string,
+          Record<string, unknown>
+        >)[args.interface];
+        const current = parseInterfaceNode(node);
+        const { sets, deletes } = interfaceReconcile(
+          args.type,
+          args.interface,
+          current,
+          args,
+        );
+        validateApplyPaths(sets, deletes);
+        const script = buildConfigScript({
+          sets,
+          deletes,
+          commit: args.commit,
+          save: args.save,
+          dryRun: args.dryRun,
+        });
+        context.logger.info(
+          "Ensuring interface {type} {iface} on {host} ({s} set, {d} delete, dryRun={dryRun})",
+          {
+            type: args.type,
+            iface: args.interface,
+            host: cfg.host,
+            s: sets.length,
+            d: deletes.length,
+            dryRun: args.dryRun,
+          },
+        );
+        const result = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: script,
+        });
+        const changed = result.stdout.includes(SENTINEL_CHANGED);
+        const committed = args.commit && changed && !args.dryRun;
+        const handle = await context.writeResource("applyResult", "last", {
+          host: cfg.host,
+          set: sets,
+          delete: deletes,
+          dryRun: args.dryRun,
+          changed,
+          committed,
+          saved: committed && args.save,
+          script: SCRIPT_REDACTED,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.code,
+          appliedAt: new Date().toISOString(),
+        });
+        if (result.code !== 0) {
+          context.logger.error(
+            "ensureInterface failed on {host} (exit {code})",
+            { host: cfg.host, code: result.code },
+          );
+          throw new Error(
+            `ensureInterface failed on ${cfg.host} (exit ${result.code}): ${result.stderr}`,
+          );
+        }
+        context.logger.info(
+          "ensureInterface {iface} complete (changed={changed}, committed={committed})",
           { iface: args.interface, changed, committed },
         );
         return { dataHandles: [handle] };

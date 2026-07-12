@@ -52,7 +52,7 @@ import {
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.11.1",
+  version: "2026.07.12.1",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,

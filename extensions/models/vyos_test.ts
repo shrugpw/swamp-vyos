@@ -13,7 +13,7 @@ import { model } from "./vyos.ts";
 
 Deno.test("model identity and global arguments are wired", () => {
   assertEquals(model.type, "@shrug/vyos");
-  assertEquals(model.version, "2026.07.11.1");
+  assertEquals(model.version, "2026.07.12.1");
   assert(model.globalArguments, "globalArguments schema present");
 });
 

@@ -9,6 +9,7 @@ import { parseFirewall, report } from "./vyos_firewall.ts";
 
 const CONFIG = [
   "set firewall group network-group rfc1918 network '10.0.0.0/8'",
+  "set firewall group network-group rfc1918 description 'private nets'",
   "set firewall ipv4 forward filter default-action 'accept'",
   "set firewall ipv4 forward filter rule 20 action 'jump'",
   "set firewall ipv4 forward filter rule 20 inbound-interface name 'eth1'",
@@ -29,15 +30,33 @@ const CONFIG = [
 
 Deno.test("parseFirewall: chains, bindings, groups", () => {
   const { chains, bindings, groups } = parseFirewall(CONFIG);
+  // group members only — the `description` leaf is metadata, not a member
   assertEquals(groups.get("network-group rfc1918"), ["10.0.0.0/8"]);
   // one interface→ruleset binding, with the interface backfilled
   assertEquals(bindings.length, 1);
   assertEquals(bindings[0].iface, "eth1");
   assertEquals(bindings[0].target, "GUEST-FWD");
-  const iot = chains.get("ipv4/GUEST-FWD")!;
-  assertEquals(iot.defaultAction, "drop");
-  assertEquals(iot.rules.size, 2);
-  assertEquals(iot.rules.get(30)!["destination port"], "8080");
+  const guest = chains.get("ipv4/GUEST-FWD")!;
+  assertEquals(guest.defaultAction, "drop");
+  assertEquals(guest.rules.size, 2);
+  assertEquals(guest.rules.get(30)!["destination port"], "8080");
+});
+
+Deno.test("parseFirewall: sibling jumps to one target keep distinct interfaces", () => {
+  // jump-target BEFORE inbound-interface (reverse of VyOS's alphabetical order)
+  // exercises the backfill path; the iface guard must not clobber sibling bindings.
+  const cfg = [
+    "set firewall ipv4 forward filter rule 5 action 'jump'",
+    "set firewall ipv4 forward filter rule 5 jump-target 'SEG-FWD'",
+    "set firewall ipv4 forward filter rule 5 inbound-interface name 'eth0'",
+    "set firewall ipv4 forward filter rule 6 action 'jump'",
+    "set firewall ipv4 forward filter rule 6 jump-target 'SEG-FWD'",
+    "set firewall ipv4 forward filter rule 6 inbound-interface name 'eth1'",
+  ].join("\n");
+  const { bindings } = parseFirewall(cfg);
+  assertEquals(bindings.length, 2);
+  assertEquals(bindings.map((b) => b.iface).sort(), ["eth0", "eth1"]);
+  assertEquals(new Set(bindings.map((b) => b.target)), new Set(["SEG-FWD"]));
 });
 
 const run = (commands: string, method = "show") =>
@@ -69,6 +88,12 @@ Deno.test("report: renders segment map, WAN exposure, ruleset detail", async () 
   assert(out.markdown.includes("GUEST-FWD"));
   assert(out.markdown.includes("WAN exposure"));
   assert(out.markdown.includes("app server"));
+  // base-chain hook defaults are surfaced (forward filter default-action accept)
+  assert(out.markdown.includes("Base chains"));
+  assert(out.markdown.includes("| ipv4 | forward |"));
+  // and a permissive base default is flagged in Attention
+  assert(out.markdown.includes("Attention"));
+  assert(out.markdown.includes("default-action is `accept`"));
   assertEquals((out.json as { status: string }).status, "ok");
 });
 

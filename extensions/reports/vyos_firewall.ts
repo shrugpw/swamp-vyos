@@ -77,7 +77,8 @@ export function parseFirewall(commands: string): {
     if (t[1] === "group") {
       const key = `${t[2]} ${t[3]}`; // network-group rfc1918
       const arr = groups.get(key) ?? [];
-      if (value) arr.push(value);
+      // t[4] is the member leaf (network/address/port/…); skip metadata (description)
+      if (value && t[4] !== "description") arr.push(value);
       groups.set(key, arr);
       continue;
     }
@@ -107,7 +108,7 @@ export function parseFirewall(commands: string): {
           for (const b of bindings) {
             if (
               b.family === family && b.base === t[2] &&
-              b.target === (r["jump-target"] ?? "")
+              b.target === (r["jump-target"] ?? "") && b.iface === "?"
             ) b.iface = value;
           }
         }
@@ -260,9 +261,10 @@ export const report = {
       }
 
       const { chains, bindings, groups } = parseFirewall(snap.commands);
-      const named = [...chains.values()].filter((c) =>
-        !["forward", "input", "output"].includes(c.name)
-      );
+      const isBase = (name: string) =>
+        ["forward", "input", "output"].includes(name);
+      const named = [...chains.values()].filter((c) => !isBase(c.name));
+      const base = [...chains.values()].filter((c) => isBase(c.name));
 
       lines.push(
         `# VyOS Firewall — ${snap.host ?? "router"}`,
@@ -273,6 +275,28 @@ export const report = {
           }`,
         "",
       );
+
+      // ── base chains: hook defaults (unmatched traffic) ──
+      if (base.length) {
+        lines.push(
+          "## Base chains (hook defaults)",
+          "",
+          "| Family | Chain | Default | Rules |",
+          "| ------ | ----- | ------- | ----: |",
+        );
+        for (
+          const c of [...base].sort((a, b) =>
+            a.family.localeCompare(b.family) || a.name.localeCompare(b.name)
+          )
+        ) {
+          lines.push(
+            `| ${c.family} | ${c.name} | ${
+              act(c.defaultAction)
+            } | ${c.rules.size} |`,
+          );
+        }
+        lines.push("");
+      }
 
       // ── segment map: interface → ruleset ──
       lines.push(
@@ -338,10 +362,10 @@ export const report = {
 
       // ── attention ──
       const notes: string[] = [];
-      for (const c of named) {
+      for (const c of [...named, ...base]) {
         if ((c.defaultAction ?? "").toLowerCase() === "accept") {
           notes.push(
-            `⚠️ **${c.family} ${c.name}** default-action is \`accept\` (permissive; segment is allow-by-default)`,
+            `⚠️ **${c.family} ${c.name}** default-action is \`accept\` (permissive; unmatched traffic is allowed)`,
           );
         }
         for (const [n, r] of c.rules) {

@@ -48,11 +48,23 @@ import {
   staticRouteMethods,
   staticRouteResources,
 } from "./routes.ts";
+import {
+  dnsForwardingCheckMethods,
+  dnsForwardingMethods,
+  dnsForwardingResources,
+} from "./dns_forwarding.ts";
+import { dhcpCheckMethods, dhcpMethods, dhcpResources } from "./dhcp.ts";
+import {
+  containerCheckMethods,
+  containerMethods,
+  containerResources,
+} from "./container.ts";
+import { pbrCheckMethods, pbrMethods, pbrResources } from "./pbr.ts";
 
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.12.1",
+  version: "2026.07.16.1",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,
@@ -64,6 +76,10 @@ export const model = {
     ...firewallResources,
     ...natResources,
     ...staticRouteResources,
+    ...dnsForwardingResources,
+    ...dhcpResources,
+    ...containerResources,
+    ...pbrResources,
   },
   checks: {
     "reachable": {
@@ -78,6 +94,10 @@ export const model = {
         ...firewallCheckMethods,
         ...natCheckMethods,
         ...staticRouteCheckMethods,
+        ...dnsForwardingCheckMethods,
+        ...dhcpCheckMethods,
+        ...containerCheckMethods,
+        ...pbrCheckMethods,
       ],
       execute: async (context: CheckContext): Promise<
         { pass: boolean; errors?: string[] }
@@ -113,5 +133,9 @@ export const model = {
     ...firewallMethods,
     ...natMethods,
     ...staticRouteMethods,
+    ...dnsForwardingMethods,
+    ...dhcpMethods,
+    ...containerMethods,
+    ...pbrMethods,
   },
 };

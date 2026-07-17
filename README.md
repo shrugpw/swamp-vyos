@@ -190,6 +190,111 @@ swamp model method run my-router ensureStaticRoute --input prefix=203.0.113.0/24
 swamp model method run my-router syncStaticRoute --input prefix=203.0.113.0/24
 ```
 
+**DNS forwarding** (`syncDnsForwarding` / `ensureDnsForwarding` /
+`removeDnsForwarding`) manages the `service dns forwarding` **singleton** (instance
+name `current`) declaratively, like router-advert manages one interface:
+`ensureDnsForwarding` wipes the `service dns forwarding` subtree and re-sets the
+desired `listenAddress[]`, `allowFrom[]`, `nameServer[]`, `system`, `cacheSize`,
+`dhcp[]` (interfaces to pull upstreams from), `dns64Prefix`, and per-`domains`
+overrides (`nameServers[]`, `recursionDesired`, `addNta`), plus a `raw[]` hatch, so
+the service ends up **exactly** as specified and a repeat is a true no-op. VyOS
+renders some multi-value leaves as JSON arrays and others as objects keyed by value;
+the parser normalizes both. Cleartext `dnsForwarding` resource.
+
+```sh
+# Preview the DNS-forwarding reconcile (omitted leaves are removed):
+swamp model method run my-router ensureDnsForwarding \
+  --input listenAddress='["192.0.2.1","2001:db8::1"]' \
+  --input allowFrom='["192.0.2.0/24","2001:db8::/32"]' \
+  --input nameServer='["192.0.2.53","2001:db8::53"]' \
+  --input domains='[{"name":"example.com","nameServers":["192.0.2.53"],"recursionDesired":true}]' \
+  --input dryRun=true
+
+swamp model method run my-router syncDnsForwarding
+```
+
+**DHCP server** (`syncDhcpSharedNetwork` / `ensureDhcpSharedNetwork` /
+`removeDhcpSharedNetwork` / `ensureStaticMappings`) manages one IPv4
+`service dhcp-server shared-network-name <SNN>` (instance = the shared-network
+name). `ensureDhcpSharedNetwork` is **whole-SNN declarative** — it wipes the SNN
+subtree and re-sets the desired shared-network `options` and `subnets[]` (each with
+its **mandatory** `subnetId`, `lease`, `options`, numbered `ranges[]`, and
+`staticMappings[]`), so an omitted subnet or mapping is a deletion and a repeat is a
+no-op. For the daily driver of adding/removing host reservations without disturbing
+hand-edited ranges/options, **`ensureStaticMappings`** is a **scoped** fan-out: it
+reconciles only the `static-mapping` children under one subnet (adds desired,
+removes stale), never touching ranges/options/`subnet-id`. Cleartext
+`dhcpSharedNetwork` resource. (IPv4 only; `dhcpv6-server` is a separate tree.)
+
+```sh
+# Whole shared-network reconcile (subnet-id is required per subnet):
+swamp model method run my-router ensureDhcpSharedNetwork \
+  --input name=SERVERS \
+  --input options='{"nameServer":["192.0.2.53"]}' \
+  --input subnets='[{"cidr":"198.51.100.0/24","subnetId":1,"lease":86400,
+    "options":{"defaultRouter":"198.51.100.1"},
+    "ranges":[{"n":0,"start":"198.51.100.100","stop":"198.51.100.200"}],
+    "staticMappings":[{"name":"nas","ipAddress":"198.51.100.10","mac":"00:00:5e:00:53:01"}]}]' \
+  --input dryRun=true
+
+# Scoped: reconcile just the reservations under one subnet:
+swamp model method run my-router ensureStaticMappings \
+  --input sharedNetwork=SERVERS --input subnet=198.51.100.0/24 \
+  --input mappings='[{"name":"nas","ipAddress":"198.51.100.10","mac":"00:00:5e:00:53:01"}]' \
+  --input dryRun=true
+```
+
+**Container** (`syncContainer` / `ensureContainer` / `removeContainer`) manages one
+`container name <name>` declaratively — `image`, `command`, `restart`, `hostName`,
+`uid`/`gid`, the valueless flags (`disable`, `allowHostNetworks`, `allowHostPid`),
+`capabilities[]`, `devices[]`, `environment[]`, `volumes[]` (`source`/`destination`
+/`mode`), `networks[]`, `ports[]`, plus a `raw[]` hatch. Because a container's
+`environment` commonly carries live secrets, the whole `container` resource is
+**vaulted** (`sensitiveOutput`, `vyos` vault), exactly like WireGuard, and
+`ensure`/`remove` write the vaulted `sensitiveApplyResult`; a `vyos` vault must be
+configured. **Note:** committing container config regenerates the systemd unit and
+may pull the image / restart the container — slow and disruptive, so run
+image-changing `ensure`s deliberately.
+
+```sh
+# Preview a container reconcile (dryRun stages + compares, never restarts):
+swamp model method run my-router ensureContainer \
+  --input name=metrics-agent \
+  --input image=docker.io/library/example-agent:1.0.0 \
+  --input restart=on-failure --input allowHostNetworks=true \
+  --input volumes='[{"name":"cfg","source":"/config/agent.yml",
+    "destination":"/etc/agent.yml","mode":"ro"}]' \
+  --input dryRun=true
+
+swamp model method run my-router syncContainer --input name=metrics-agent
+```
+
+**Policy route (PBR)** (`syncPolicyRoute` / `ensurePolicyRoute` /
+`removePolicyRoute`) manages one `policy route <name>` (IPv4) or `policy route6
+<name>` (IPv6, auto-selected from the `family` arg) as **one declarative unit**,
+like a firewall ruleset — it shares the firewall rule's `source`/`destination`
+match schema (`address`, `port`, `group` address-/network-/port-group).
+`ensurePolicyRoute` wipes the ruleset subtree and sets the desired `interface`,
+`description`, `enableDefaultLog`, and numbered `rules[]` (`action`, `protocol`,
+`source`/`destination`, `set` `table`/`mark`/`dscp`, `disable`, `log`, `raw[]`), so
+an omitted rule is a deletion and a repeat is a no-op. Instance name is
+`<family>-<name>` (e.g. `ipv4-mgmt`). **Note:** a policy-route ruleset only takes
+effect once **bound** to an interface via `set interfaces <if> policy route <name>`,
+which lives outside this subtree (on the interface) — the in-ruleset `interface`
+leaf is modeled but is not that activation binding.
+
+```sh
+# Preview a PBR ruleset reconcile (omitted rules removed):
+swamp model method run my-router ensurePolicyRoute \
+  --input family=ipv4 --input name=mgmt --input interfaces='["eth1"]' \
+  --input rules='[
+    {"number":1,"action":"drop",
+     "source":{"address":"192.0.2.10/32"},"destination":{"address":"203.0.113.5/32"}}
+  ]' --input dryRun=true
+
+swamp model method run my-router syncPolicyRoute --input family=ipv4 --input name=mgmt
+```
+
 ## Sensitive output
 
 By default an `apply` result stores `stdout`/`stderr` in cleartext and redacts

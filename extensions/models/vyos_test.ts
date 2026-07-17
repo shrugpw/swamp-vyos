@@ -13,7 +13,7 @@ import { model } from "./vyos.ts";
 
 Deno.test("model identity and global arguments are wired", () => {
   assertEquals(model.type, "@shrug/vyos");
-  assertEquals(model.version, "2026.07.12.1");
+  assertEquals(model.version, "2026.07.16.1");
   assert(model.globalArguments, "globalArguments schema present");
 });
 
@@ -48,10 +48,27 @@ Deno.test("every family's methods are spread into the model", () => {
     "syncStaticRoute",
     "ensureStaticRoute",
     "removeStaticRoute",
+    // dns forwarding
+    "syncDnsForwarding",
+    "ensureDnsForwarding",
+    "removeDnsForwarding",
+    // dhcp
+    "syncDhcpSharedNetwork",
+    "ensureDhcpSharedNetwork",
+    "removeDhcpSharedNetwork",
+    "ensureStaticMappings",
+    // container
+    "syncContainer",
+    "ensureContainer",
+    "removeContainer",
+    // policy route (pbr)
+    "syncPolicyRoute",
+    "ensurePolicyRoute",
+    "removePolicyRoute",
   ];
   const actual = Object.keys(model.methods).sort();
   assertEquals(actual, [...expected].sort());
-  assertEquals(actual.length, 22);
+  assertEquals(actual.length, 35);
 });
 
 Deno.test("every family's resource specs are spread into the model", () => {
@@ -70,6 +87,10 @@ Deno.test("every family's resource specs are spread into the model", () => {
     "firewallRuleset",
     "natRuleset",
     "staticRoute",
+    "dnsForwarding",
+    "dhcpSharedNetwork",
+    "container",
+    "policyRoute",
   ];
   assertEquals(Object.keys(model.resources).sort(), [...expected].sort());
 });
@@ -92,6 +113,15 @@ Deno.test("reachable appliesTo is composed from every family's CheckMethods", ()
     "removeNat",
     "ensureStaticRoute",
     "removeStaticRoute",
+    "ensureDnsForwarding",
+    "removeDnsForwarding",
+    "ensureDhcpSharedNetwork",
+    "removeDhcpSharedNetwork",
+    "ensureStaticMappings",
+    "ensureContainer",
+    "removeContainer",
+    "ensurePolicyRoute",
+    "removePolicyRoute",
   ];
   assertEquals(check.appliesTo, expected);
   // Every gated method must exist in the model; no sync* method is gated.

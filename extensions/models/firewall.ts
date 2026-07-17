@@ -17,7 +17,7 @@ import {
 import type { ExecuteContext, ExecuteResult, SshRunner } from "./core.ts";
 
 /** A source/destination match block within a firewall rule. */
-const FirewallMatchSchema = z.object({
+export const FirewallMatchSchema = z.object({
   address: z.string().optional().describe(
     "Address/CIDR/range, optionally negated with a leading '!'",
   ),
@@ -115,7 +115,7 @@ export interface FirewallRulesetDesired {
 }
 
 /** Emit the `set` leaves for one rule's source/destination match block. */
-function firewallMatchSetPaths(
+export function firewallMatchSetPaths(
   ruleBase: string,
   side: "source" | "destination",
   m: FirewallMatchDesired,

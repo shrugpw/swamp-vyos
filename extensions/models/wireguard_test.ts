@@ -139,6 +139,63 @@ Deno.test("ensureWireguard reconciles and vaults the result", async () => {
   assertEquals(writes[0].specName, "sensitiveApplyResult");
 });
 
+Deno.test("ensureWireguard sources the private-key from the wireguardKeys globalArg", async () => {
+  const calls: SshCall[] = [];
+  // Simulate the engine having resolved `${{ vault.get(...) }}` into the
+  // per-interface keyring on globalArgs. The method is called with NO explicit
+  // privateKey argument (a vault-backed key can only arrive this way).
+  const { context, writes } = fakeContext("192.0.2.1", {
+    wireguardKeys: { "wg-bos": "RINGKEY=" },
+  });
+  await ensureWgExec(
+    {
+      interface: "wg-bos",
+      address: ["2001:db8:e::24/126"],
+      peers: [{ name: "hub", publicKey: "PUB=", allowedIps: ["::/0"] }],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  const script = String(calls[0].stdin);
+  assert(
+    script.includes("set interfaces wireguard wg-bos private-key RINGKEY="),
+    "keyring private-key should be set on the interface",
+  );
+  assertEquals(writes[0].specName, "sensitiveApplyResult");
+});
+
+Deno.test("ensureWireguard: explicit privateKey argument overrides the keyring", async () => {
+  const calls: SshCall[] = [];
+  const { context } = fakeContext("192.0.2.1", {
+    wireguardKeys: { "wg-bos": "RINGKEY=" },
+  });
+  await ensureWgExec(
+    {
+      interface: "wg-bos",
+      privateKey: "ARGKEY=",
+      address: ["2001:db8:e::24/126"],
+      peers: [],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  const script = String(calls[0].stdin);
+  assert(
+    script.includes("set interfaces wireguard wg-bos private-key ARGKEY="),
+    "explicit argument should win over the keyring",
+  );
+  assert(
+    !script.includes("RINGKEY="),
+    "keyring value must not leak when an explicit key is given",
+  );
+});
+
 Deno.test("ensureWireguard requires at least one field", async () => {
   const { context } = fakeContext();
   await assertRejects(

@@ -278,7 +278,24 @@ export const wireguardMethods = {
     ): Promise<ExecuteResult> => {
       const cfg = context.globalArgs;
       const ssh = args._ssh ?? sshExec;
-      const sets = wireguardSetPaths(args.interface, args);
+      // Resolve the interface private-key. Precedence: an explicit `privateKey`
+      // argument wins; otherwise fall back to the per-interface keyring in
+      // globalArgs (`wireguardKeys[<interface>]`). The engine resolves
+      // `${{ vault.get(...) }}` only inside the model definition's
+      // globalArguments, never in method inputs, so a vault-backed key MUST
+      // arrive via the keyring rather than as a method argument.
+      const keyFromRing = cfg.wireguardKeys?.[args.interface];
+      const privateKey = args.privateKey ?? keyFromRing;
+      context.logger.debug(
+        "wireguard {iface}: private-key source={src}",
+        {
+          iface: args.interface,
+          src: args.privateKey
+            ? "argument"
+            : (keyFromRing ? "keyring" : "none"),
+        },
+      );
+      const sets = wireguardSetPaths(args.interface, { ...args, privateKey });
       if (sets.length === 0) {
         throw new Error(
           "ensureWireguard requires at least one field to set (use removeWireguard to clear)",

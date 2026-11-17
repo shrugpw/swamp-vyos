@@ -27,7 +27,10 @@ function stubSsh(
 }
 
 export /** Minimal fake execute context capturing writes and logs. */
-function fakeContext(host = "192.0.2.1") {
+function fakeContext(
+  host = "192.0.2.1",
+  globals: Record<string, unknown> = {},
+) {
   const writes: Array<
     { specName: string; name: string; data: Record<string, unknown> }
   > = [];
@@ -35,7 +38,7 @@ function fakeContext(host = "192.0.2.1") {
   const log = (level: string) => (message: string) =>
     logs.push({ level, message });
   const context = {
-    globalArgs: { host, user: "vyos", port: 22 },
+    globalArgs: { host, user: "vyos", port: 22, ...globals },
     logger: {
       debug: log("debug"),
       info: log("info"),

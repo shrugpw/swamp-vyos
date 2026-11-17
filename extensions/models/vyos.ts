@@ -64,7 +64,7 @@ import { pbrCheckMethods, pbrMethods, pbrResources } from "./pbr.ts";
 /** VyOS router management model definition. */
 export const model = {
   type: "@shrug/vyos",
-  version: "2026.07.16.1",
+  version: "2026.11.17.1",
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,

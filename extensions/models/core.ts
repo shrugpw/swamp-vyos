@@ -41,6 +41,21 @@ export const GlobalArgsSchema = z.object({
         "is offered (avoids MaxAuthTries when the agent holds many keys). " +
         "Omit to use the SSH agent/ssh config.",
     ),
+  wireguardKeys: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      "Per-interface WireGuard private keys, keyed by interface name (e.g. " +
+        '{"wg-bos": "<key>"}). ensureWireguard uses ' +
+        "wireguardKeys[<interface>] as the interface private-key when no " +
+        "explicit privateKey argument is given. This is the ONLY seam for a " +
+        "vault-backed key: the engine resolves ${{ vault.get(...) }} inside " +
+        "the model definition's globalArguments, never in method inputs, so " +
+        "wire each key from the vault in the definition, e.g. wireguardKeys: " +
+        '{ wg-bos: \'${{ vault.get("vyos", "bed-wg-bos-privkey") }}\' }. ' +
+        "SENSITIVE: never logged, snapshotted, or echoed (only the source " +
+        "label is logged, never the value).",
+    ),
 });
 
 /** Resolved connection/authentication settings. */

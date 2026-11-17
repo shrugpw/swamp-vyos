@@ -66,6 +66,25 @@ Deno.test("buildConfigScript commits and saves only under sessionChanged", () =>
   assert(script.includes("SWAMP_APPLY_NOCHANGE"));
 });
 
+Deno.test("buildConfigScript commit-confirm arms the timer and does not save", () => {
+  const script = buildConfigScript({
+    sets: ["firewall ipv4 input filter default-action drop"],
+    deletes: [],
+    commit: true,
+    save: true,
+    dryRun: false,
+    confirmMinutes: 5,
+  });
+  // commit-confirm replaces a bare commit...
+  assert(script.includes("commit-confirm 5"));
+  assert(!script.includes("\n    commit\n"));
+  // ...and does NOT save even though save=true (no-save-until-confirm, so an
+  // un-confirmed config never lands in config.boot ahead of the auto-revert)...
+  assert(!script.includes("\n    save"));
+  // ...while keeping the committed session with a plain `exit`, not discarding.
+  assert(script.includes("echo SWAMP_APPLY_CHANGED\n    exit\n"));
+});
+
 Deno.test("buildConfigScript dryRun compares (net) and discards, never commits", () => {
   const script = buildConfigScript({
     sets: ["interface eth0 description test"],

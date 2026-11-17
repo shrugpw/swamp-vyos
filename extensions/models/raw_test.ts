@@ -17,6 +17,8 @@ const runExec = (model.methods.run.execute) as any;
 const diffExec = (model.methods.diff.execute) as any;
 // deno-lint-ignore no-explicit-any
 const treeExec = (model.methods.tree.execute) as any;
+// deno-lint-ignore no-explicit-any
+const confirmExec = (model.methods.confirm.execute) as any;
 
 Deno.test("show snapshots op-mode output to the config resource", async () => {
   const calls: SshCall[] = [];
@@ -501,4 +503,137 @@ Deno.test("run throws on nonzero exit and writes the result first", async () => 
   );
   assertEquals(writes.length, 1);
   assertEquals(writes[0].data.exitCode, 1);
+});
+
+Deno.test("apply commit-confirm arms the timer, reports confirmPending, and does not save", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await applyExec(
+    {
+      set: ["firewall ipv4 input filter default-action drop"],
+      delete: [],
+      commit: true,
+      // save=true on purpose: the commit-confirm path must still report
+      // saved=false, so the record never claims a save that did not happen.
+      save: true,
+      confirmMinutes: 5,
+      dryRun: false,
+      storeScript: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].specName, "applyResult");
+  assertEquals(writes[0].data.changed, true);
+  assertEquals(writes[0].data.committed, true);
+  assertEquals(writes[0].data.confirmPending, true);
+  assertEquals(writes[0].data.confirmMinutes, 5);
+  // the key safety invariant: never report saved for an un-confirmed change
+  assertEquals(writes[0].data.saved, false);
+  // the piped script arms commit-confirm, not a bare commit
+  assert(String(calls[0].stdin).includes("commit-confirm 5"));
+  assert(!String(calls[0].stdin).includes("\n    commit\n"));
+});
+
+Deno.test("apply rejects confirmMinutes with commit=false", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      applyExec(
+        {
+          set: ["system host-name vyos"],
+          delete: [],
+          commit: false,
+          save: false,
+          confirmMinutes: 5,
+          dryRun: false,
+          storeScript: false,
+          _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+        },
+        context,
+      ),
+    Error,
+    "requires commit=true",
+  );
+  // rejected before any ssh call or write
+  assertEquals(calls.length, 0);
+  assertEquals(writes.length, 0);
+});
+
+Deno.test("apply rejects confirmMinutes with dryRun", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      applyExec(
+        {
+          set: ["system host-name vyos"],
+          delete: [],
+          commit: true,
+          save: true,
+          confirmMinutes: 5,
+          dryRun: true,
+          storeScript: false,
+          _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+        },
+        context,
+      ),
+    Error,
+    "cannot be combined with dryRun",
+  );
+  assertEquals(calls.length, 0);
+  assertEquals(writes.length, 0);
+});
+
+Deno.test("confirm cancels the timer and saves, recording confirmResult", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await confirmExec(
+    { save: true, _ssh: stubSsh({ stdout: "" }, calls) },
+    context,
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].specName, "confirmResult");
+  assertEquals(writes[0].data.confirmed, true);
+  assertEquals(writes[0].data.saved, true);
+  // two calls: op-mode confirm, then a config-mode save
+  assertEquals(calls.length, 2);
+  assertEquals(calls[0].command, [
+    "/opt/vyatta/bin/vyatta-op-cmd-wrapper",
+    "confirm",
+  ]);
+  assertEquals(calls[1].command, ["/bin/vbash", "-s"]);
+  assert(String(calls[1].stdin).includes("save"));
+});
+
+Deno.test("confirm with save=false only cancels the timer", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await confirmExec(
+    { save: false, _ssh: stubSsh({ stdout: "" }, calls) },
+    context,
+  );
+  assertEquals(writes[0].data.confirmed, true);
+  assertEquals(writes[0].data.saved, false);
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("confirm throws on confirm failure and writes the result first", async () => {
+  const calls: SshCall[] = [];
+  const { context, writes } = fakeContext();
+  await assertRejects(
+    () =>
+      confirmExec(
+        { save: true, _ssh: stubSsh({ code: 1, stderr: "no pending" }, calls) },
+        context,
+      ),
+    Error,
+    "confirm failed",
+  );
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].data.confirmed, false);
+  // save is skipped when confirm fails
+  assertEquals(calls.length, 1);
 });

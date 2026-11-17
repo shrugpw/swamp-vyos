@@ -171,6 +171,16 @@ export interface ConfigScriptOptions {
   commit: boolean;
   save: boolean;
   dryRun: boolean;
+  /**
+   * When > 0 and committing, emit `commit-confirm <N>` instead of a bare
+   * `commit`: the change is committed with an N-minute auto-revert timer, so a
+   * management-severing change rolls itself back unless a later `confirm`
+   * cancels the timer. In this path the script deliberately does NOT `save`
+   * (saving an un-confirmed change to config.boot would survive the auto-revert
+   * reboot, defeating the safety); the `confirm` method saves once the change
+   * is made permanent. Ignored when 0/undefined (plain `commit`) or in dryRun.
+   */
+  confirmMinutes?: number;
 }
 
 /**
@@ -205,9 +215,21 @@ export function buildConfigScript(opts: ConfigScriptOptions): string {
     lines.push(`    echo ${SENTINEL_CHANGED}`);
     lines.push("    exit discard");
   } else {
-    if (opts.commit) lines.push("    commit");
-    if (opts.save) lines.push("    save");
+    const confirmMinutes = opts.confirmMinutes ?? 0;
+    if (opts.commit && confirmMinutes > 0) {
+      // commit-confirm arms an N-minute auto-revert timer: the change is active
+      // now but config.boot is left untouched, so a management-severing change
+      // rolls back on its own unless `confirm` cancels the timer. Do NOT save
+      // here — an un-confirmed bad config must not survive the auto-revert
+      // reboot; the `confirm` method saves once the change is made permanent.
+      lines.push(`    commit-confirm ${confirmMinutes}`);
+    } else {
+      if (opts.commit) lines.push("    commit");
+      if (opts.save) lines.push("    save");
+    }
     lines.push(`    echo ${SENTINEL_CHANGED}`);
+    // A commit (plain or commit-confirm) keeps the session with `exit`; only a
+    // non-committing apply discards.
     lines.push(opts.commit ? "    exit" : "    exit discard");
   }
   lines.push("  fi");

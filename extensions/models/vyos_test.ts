@@ -25,6 +25,7 @@ Deno.test("every family's methods are spread into the model", () => {
     "apply",
     "diff",
     "run",
+    "confirm",
     // router-advert
     "syncRouterAdvert",
     "ensureRouterAdvert",
@@ -68,7 +69,7 @@ Deno.test("every family's methods are spread into the model", () => {
   ];
   const actual = Object.keys(model.methods).sort();
   assertEquals(actual, [...expected].sort());
-  assertEquals(actual.length, 35);
+  assertEquals(actual.length, 36);
 });
 
 Deno.test("every family's resource specs are spread into the model", () => {
@@ -81,6 +82,7 @@ Deno.test("every family's resource specs are spread into the model", () => {
     "configTree",
     "sensitiveConfigTree",
     "commandResult",
+    "confirmResult",
     "routerAdvert",
     "wireguard",
     "interface",
@@ -102,6 +104,7 @@ Deno.test("reachable appliesTo is composed from every family's CheckMethods", ()
   const expected = [
     "apply",
     "diff",
+    "confirm",
     "ensureRouterAdvert",
     "removeRouterAdvert",
     "ensureWireguard",

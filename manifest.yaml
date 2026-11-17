@@ -2,6 +2,7 @@ manifestVersion: 1
 name: "@shrug/vyos"
 version: "2026.11.17.1"
 description: "Manage a VyOS router over SSH: read the running config, apply set/delete commands via vbash, and run arbitrary op-/config-mode commands."
+license: MIT
 
 repository: https://github.com/shrugpw/swamp-vyos
 

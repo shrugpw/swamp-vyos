@@ -48,6 +48,15 @@ swamp model method run my-router run --input command="show interfaces" --input o
 swamp vault create local_encryption vyos          # one-time
 swamp model method run my-router apply --input sensitive=true \
   --input set='["interfaces wireguard wg0 private-key s3cr3t"]'
+
+# Apply a management-severing change safely with auto-rollback: commit-confirm
+# arms a 5-minute revert timer instead of a plain commit (and does NOT save),
+# so if the change cuts your path to the router it reverts on its own.
+swamp model method run my-router apply --input confirmMinutes=5 \
+  --input set='["firewall ipv4 input filter default-action drop"]'
+# ...then, once you have confirmed you are still reachable, make it permanent
+# (cancels the timer and saves to config.boot):
+swamp model method run my-router confirm
 ```
 
 ## Methods
@@ -64,7 +73,23 @@ swamp model method run my-router apply --input sensitive=true \
   and `save` (both toggleable). Requires at least one `set` or `delete`. Pass
   `dryRun=true` to stage and print the diff without committing,
   `storeScript=true` to persist the generated script, and `sensitive=true` to
-  vault the secret-bearing fields (see below).
+  vault the secret-bearing fields (see below). Pass `confirmMinutes=<N>` (with
+  `commit=true`, not `dryRun`) to commit with VyOS **`commit-confirm <N>`** — an
+  N-minute auto-revert timer — instead of a plain commit, for a
+  management-severing change (e.g. a firewall base-chain or mgmt-path interface
+  change) that must roll back if it cuts your access. In that path `apply`
+  deliberately does **not** `save`: an un-confirmed config must not land in
+  `config.boot` ahead of the auto-revert. The result records `confirmPending` /
+  `confirmMinutes`. **Caveat:** a change that severs the mgmt path can drop the
+  SSH session before `apply` returns, so `apply` may throw and `confirmPending`
+  may read false even though the router armed the timer — treat the auto-revert
+  timer, not the `confirmPending` field, as the real safety net, verify
+  reachability out of band, and only then `confirm`.
+- **`confirm`** — make a pending `commit-confirm` permanent: cancel the
+  auto-revert timer (op-mode `confirm`), then `save` the now-permanent running
+  config to `config.boot` (`save=false` to skip the save). Writes the
+  `confirmResult` resource. Run it once you have verified the router is still
+  reachable after a `confirmMinutes` apply.
 - **`diff`** — **read-only** preview of what a `set`/`delete` would change. It
   stages the change, runs VyOS `compare`, and discards the session — it never
   commits. Writes the `compare` output to the `diff` resource (or

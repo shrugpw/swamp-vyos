@@ -10,6 +10,7 @@ import {
   extractDiff,
   OP_WRAPPER,
   SCRIPT_REDACTED,
+  SCRIPT_TEMPLATE,
   SENTINEL_CHANGED,
   sshExec,
   validateApplyPaths,
@@ -66,6 +67,19 @@ const ApplyResultSchema = z.object({
   ),
   committed: z.boolean(),
   saved: z.boolean(),
+  confirmMinutes: z
+    .number()
+    .int()
+    .default(0)
+    .describe(
+      "Minutes of the commit-confirm auto-revert timer this apply armed (0 = plain commit)",
+    ),
+  confirmPending: z
+    .boolean()
+    .default(false)
+    .describe(
+      "True when a commit-confirm was armed and still awaits `confirm` to be made permanent",
+    ),
   script: z
     .string()
     .describe("The vbash script that was piped (redacted unless storeScript)"),
@@ -138,6 +152,21 @@ const CommandResultSchema = z.object({
   ranAt: z.iso.datetime(),
 });
 
+/** Outcome of a `confirm` (make a pending commit-confirm permanent, then save). */
+const ConfirmResultSchema = z.object({
+  host: z.string(),
+  confirmed: z.boolean().describe(
+    "True when op-mode `confirm` cancelled the pending auto-revert timer",
+  ),
+  saved: z.boolean().describe(
+    "True when the now-permanent running config was saved to config.boot",
+  ),
+  stdout: z.string(),
+  stderr: z.string(),
+  exitCode: z.number().int(),
+  confirmedAt: z.iso.datetime(),
+});
+
 /** Resource specs for the raw config transport. */
 export const rawResources = {
   "config": {
@@ -193,6 +222,13 @@ export const rawResources = {
   "commandResult": {
     description: "Outcome of a generic run command",
     schema: CommandResultSchema,
+    lifetime: "infinite",
+    garbageCollection: 50,
+  },
+  "confirmResult": {
+    description:
+      "Outcome of a confirm (cancel a pending commit-confirm timer, then save)",
+    schema: ConfirmResultSchema,
     lifetime: "infinite",
     garbageCollection: 50,
   },
@@ -313,6 +349,17 @@ export const rawMethods = {
         .describe("Config paths to delete (without the leading 'delete')"),
       commit: z.boolean().default(true),
       save: z.boolean().default(true),
+      confirmMinutes: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          "When > 0, commit with `commit-confirm <N>` (an N-minute auto-revert " +
+            "timer) instead of a bare commit, and do not save until `confirm`; " +
+            "for management-severing changes that must roll back if they cut the " +
+            "mgmt path. Requires commit=true and dryRun=false.",
+        ),
       dryRun: z
         .boolean()
         .default(false)
@@ -335,6 +382,7 @@ export const rawMethods = {
         delete: string[];
         commit: boolean;
         save: boolean;
+        confirmMinutes?: number;
         dryRun: boolean;
         storeScript: boolean;
         sensitive: boolean;
@@ -347,6 +395,19 @@ export const rawMethods = {
       if (args.set.length === 0 && args.delete.length === 0) {
         throw new Error("apply requires at least one set or delete command");
       }
+      // Tests call execute directly, bypassing the zod default, so read it
+      // defensively.
+      const confirmMinutes = args.confirmMinutes ?? 0;
+      if (confirmMinutes > 0 && !args.commit) {
+        throw new Error(
+          "apply: confirmMinutes requires commit=true (a commit-confirm is a commit)",
+        );
+      }
+      if (confirmMinutes > 0 && args.dryRun) {
+        throw new Error(
+          "apply: confirmMinutes cannot be combined with dryRun (dryRun never commits)",
+        );
+      }
       validateApplyPaths(args.set, args.delete);
       const script = buildConfigScript({
         sets: args.set,
@@ -354,14 +415,16 @@ export const rawMethods = {
         commit: args.commit,
         save: args.save,
         dryRun: args.dryRun,
+        confirmMinutes,
       });
       context.logger.info(
-        "Applying to {host}: {sets} set, {deletes} delete (dryRun={dryRun})",
+        "Applying to {host}: {sets} set, {deletes} delete (dryRun={dryRun}, confirmMinutes={confirmMinutes})",
         {
           host: cfg.host,
           sets: args.set.length,
           deletes: args.delete.length,
           dryRun: args.dryRun,
+          confirmMinutes,
         },
       );
       const result = await ssh(cfg, {
@@ -370,6 +433,9 @@ export const rawMethods = {
       });
       const changed = result.stdout.includes(SENTINEL_CHANGED);
       const committed = args.commit && changed && !args.dryRun;
+      // A commit-confirm armed a timer that still awaits `confirm`.
+      const confirmPending = confirmMinutes > 0 && changed && !args.dryRun &&
+        result.code === 0;
       // When sensitive, the whole record is vaulted, so redacting the script
       // is pointless — persist it in full (it is protected by the vault).
       const persistFullScript = args.sensitive || args.storeScript;
@@ -383,7 +449,11 @@ export const rawMethods = {
         dryRun: args.dryRun,
         changed,
         committed,
-        saved: committed && args.save,
+        // A commit-confirm deliberately does not save until `confirm`, so the
+        // record must never claim saved=true in that path even if save was set.
+        saved: committed && args.save && confirmMinutes === 0,
+        confirmMinutes,
+        confirmPending,
         script: persistFullScript ? script : SCRIPT_REDACTED,
         stdout: result.stdout,
         stderr: result.stderr,
@@ -400,8 +470,8 @@ export const rawMethods = {
         );
       }
       context.logger.info(
-        "apply on {host} complete (changed={changed}, committed={committed})",
-        { host: cfg.host, changed, committed },
+        "apply on {host} complete (changed={changed}, committed={committed}, confirmPending={confirmPending})",
+        { host: cfg.host, changed, committed, confirmPending },
       );
       return { dataHandles: [handle] };
     },
@@ -539,7 +609,76 @@ export const rawMethods = {
       return { dataHandles: [handle] };
     },
   },
+  confirm: {
+    description:
+      "Make a pending commit-confirm permanent: cancel the auto-revert timer (op-mode `confirm`), then save the now-permanent running config to config.boot.",
+    arguments: z.object({
+      save: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Persist the now-permanent config to config.boot after confirming",
+        ),
+    }),
+    execute: async (
+      args: { save: boolean; _ssh?: SshRunner },
+      context: ExecuteContext,
+    ): Promise<ExecuteResult> => {
+      const cfg = context.globalArgs;
+      const ssh = args._ssh ?? sshExec;
+      context.logger.info("Confirming pending commit-confirm on {host}", {
+        host: cfg.host,
+      });
+      const confirmRes = await ssh(cfg, { command: [OP_WRAPPER, "confirm"] });
+      const confirmed = confirmRes.code === 0;
+      let saveRes: { stdout: string; stderr: string; code: number } | null =
+        null;
+      if (args.save && confirmed) {
+        // `confirm` only makes the change permanent in the running config; save
+        // persists it to config.boot so it survives a reboot.
+        const saveScript = `source ${SCRIPT_TEMPLATE}\nconfigure\nsave\nexit\n`;
+        saveRes = await ssh(cfg, {
+          command: ["/bin/vbash", "-s"],
+          stdin: saveScript,
+        });
+      }
+      const saved = saveRes !== null && saveRes.code === 0;
+      const exitCode = !confirmed ? confirmRes.code : (saveRes?.code ?? 0);
+      const handle = await context.writeResource("confirmResult", "last", {
+        host: cfg.host,
+        confirmed,
+        saved,
+        stdout: confirmRes.stdout + (saveRes?.stdout ?? ""),
+        stderr: confirmRes.stderr + (saveRes?.stderr ?? ""),
+        exitCode,
+        confirmedAt: new Date().toISOString(),
+      });
+      if (!confirmed) {
+        context.logger.error("confirm failed on {host} (exit {code})", {
+          host: cfg.host,
+          code: confirmRes.code,
+        });
+        throw new Error(
+          `confirm failed on ${cfg.host} (exit ${confirmRes.code}): ${confirmRes.stderr}`,
+        );
+      }
+      if (args.save && !saved) {
+        context.logger.error("confirm: save failed on {host} (exit {code})", {
+          host: cfg.host,
+          code: saveRes?.code,
+        });
+        throw new Error(
+          `confirm: save failed on ${cfg.host} (exit ${saveRes?.code}): ${saveRes?.stderr}`,
+        );
+      }
+      context.logger.info(
+        "confirm on {host} complete (confirmed={confirmed}, saved={saved})",
+        { host: cfg.host, confirmed, saved },
+      );
+      return { dataHandles: [handle] };
+    },
+  },
 };
 
 /** Raw methods that require the reachable pre-flight check. */
-export const rawCheckMethods = ["apply", "diff"];
+export const rawCheckMethods = ["apply", "diff", "confirm"];

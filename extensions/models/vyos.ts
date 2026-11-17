@@ -68,6 +68,19 @@ export const model = {
   description:
     "Manage a VyOS router over SSH: read config, apply set/delete via vbash, run commands.",
   globalArguments: GlobalArgsSchema,
+  // 2026.11.17.1 adds an optional `wireguardKeys` globalArg (the vault-backed
+  // WireGuard keyring) and a `confirmMinutes` apply option. Both are purely
+  // additive: globalArguments gains one optional field, so existing instances
+  // need no data migration. A no-op upgrade entry makes the version bump migrate
+  // cleanly instead of warning on a bump without an upgrade path.
+  upgrades: [
+    {
+      toVersion: "2026.11.17.1",
+      description:
+        "Additive optional wireguardKeys globalArg + commit-confirm apply option; no globalArguments migration needed.",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   resources: {
     ...rawResources,
     ...routerAdvertResources,

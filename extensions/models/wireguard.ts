@@ -38,7 +38,7 @@ const WireguardSchema = z.object({
   host: z.string(),
   interface: z.string(),
   exists: z.boolean(),
-  privateKey: z.string().optional(),
+  privateKey: z.string().optional().meta({ sensitive: true }),
   address: z.array(z.string()).default([]),
   port: z.union([z.number().int(), z.string()]).optional(),
   mtu: z.union([z.number().int(), z.string()]).optional(),
@@ -252,7 +252,7 @@ export const wireguardMethods = {
       "Declaratively set the WireGuard config for one interface (reconciles to exactly the desired state; result is vaulted).",
     arguments: z.object({
       interface: z.string(),
-      privateKey: z.string().optional(),
+      privateKey: z.string().optional().meta({ sensitive: true }),
       address: z.array(z.string()).default([]),
       port: z.union([z.number().int(), z.string()]).optional(),
       mtu: z.union([z.number().int(), z.string()]).optional(),

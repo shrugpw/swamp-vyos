@@ -355,7 +355,11 @@ The model shells out to the host `ssh` binary. All SSH is deliberately isolated
 in a single `sshExec()` helper: `show`/`run` send a remote argv, and `apply`
 pipes a generated `vbash` script over stdin to `/bin/vbash -s`. Config sessions
 source `/opt/vyatta/etc/functions/script-template` so `configure`/`set`/`commit`
-resolve; op-mode reads use `/opt/vyatta/bin/vyatta-op-cmd-wrapper`.
+resolve; op-mode reads use `/opt/vyatta/bin/vyatta-op-cmd-wrapper`. The sole
+subprocess is that one `ssh` spawn, and its argument vector is fixed and vetted:
+literal `ssh` flags, the integer port, and caller-supplied config/command paths
+that pass `validateApplyPaths` (no shell is ever involved — arguments go
+straight to `execve`, and config bodies travel over stdin, never the argv).
 
 **Prerequisites:** the host running swamp must reach the router over SSH with
 key/agent auth (the model uses `BatchMode=yes` — no interactive prompts). Set

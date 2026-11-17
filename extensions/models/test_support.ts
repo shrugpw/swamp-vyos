@@ -34,9 +34,19 @@ function fakeContext(
   const writes: Array<
     { specName: string; name: string; data: Record<string, unknown> }
   > = [];
-  const logs: Array<{ level: string; message: string }> = [];
-  const log = (level: string) => (message: string) =>
-    logs.push({ level, message });
+  const logs: Array<
+    {
+      level: string;
+      message: string;
+      properties?: Record<string, unknown>;
+    }
+  > = [];
+  // Capture the structured properties too, so a test can assert a secret value
+  // never reaches the log (not the message template, not a property value).
+  const log =
+    (level: string) =>
+    (message: string, properties?: Record<string, unknown>) =>
+      logs.push({ level, message, properties });
   const context = {
     globalArgs: { host, user: "vyos", port: 22, ...globals },
     logger: {

@@ -44,15 +44,16 @@ export const GlobalArgsSchema = z.object({
   wireguardKeys: z
     .record(z.string(), z.string())
     .optional()
+    .meta({ sensitive: true })
     .describe(
       "Per-interface WireGuard private keys, keyed by interface name (e.g. " +
-        '{"wg-bos": "<key>"}). ensureWireguard uses ' +
+        '{"wg0": "<key>"}). ensureWireguard uses ' +
         "wireguardKeys[<interface>] as the interface private-key when no " +
         "explicit privateKey argument is given. This is the ONLY seam for a " +
-        "vault-backed key: the engine resolves ${{ vault.get(...) }} inside " +
+        "vault-backed key: the engine resolves a vault.get(...) macro inside " +
         "the model definition's globalArguments, never in method inputs, so " +
         "wire each key from the vault in the definition, e.g. wireguardKeys: " +
-        '{ wg-bos: \'${{ vault.get("vyos", "bed-wg-bos-privkey") }}\' }. ' +
+        "{ wg0: '<vault.get macro for your wg0 private-key secret>' }. " +
         "SENSITIVE: never logged, snapshotted, or echoed (only the source " +
         "label is logged, never the value).",
     ),
@@ -112,6 +113,13 @@ export const sshExec: SshRunner = async (cfg, opts) => {
   args.push(`${cfg.user}@${cfg.host}`);
   if (opts.command) args.push(...opts.command);
 
+  // The SSH binary is the sole transport seam (see the module TODO on swapping
+  // this for @swamp/ssh once context.runModel ships). The argv is fixed and
+  // vetted: literal ssh flags, the integer port, and caller config/command
+  // paths that pass validateApplyPaths (no shell is involved — args go straight
+  // to execve, never a shell string). Config bodies are piped over stdin, not
+  // argv.
+  // swamp-quality-ignore deno-command
   const command = new Deno.Command("ssh", {
     args,
     stdin: opts.stdin !== undefined ? "piped" : "null",

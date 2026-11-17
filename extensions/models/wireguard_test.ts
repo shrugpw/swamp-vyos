@@ -196,6 +196,77 @@ Deno.test("ensureWireguard: explicit privateKey argument overrides the keyring",
   );
 });
 
+Deno.test("ensureWireguard never logs the private-key value (only the source label)", async () => {
+  const calls: SshCall[] = [];
+  // A distinctive sentinel so a leak anywhere in the logs is unmistakable.
+  const { context, writes, logs } = fakeContext("192.0.2.1", {
+    wireguardKeys: { "wg-bos": "WGPRIVSENTINEL=" },
+  });
+  await ensureWgExec(
+    {
+      interface: "wg-bos",
+      address: ["2001:db8:e::24/126"],
+      peers: [],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  // The key must have actually been applied (so the path under test ran)...
+  assert(
+    String(calls[0].stdin).includes("private-key WGPRIVSENTINEL="),
+    "the keyring key should reach the config script",
+  );
+  // ...but the key VALUE must appear in no log message and no log property.
+  const loggedText = logs
+    .map((l) => `${l.message} ${JSON.stringify(l.properties ?? {})}`)
+    .join("\n");
+  assert(
+    !loggedText.includes("WGPRIVSENTINEL="),
+    "the private-key value must never reach the logs",
+  );
+  // The source label IS logged (keyring), proving only the label is surfaced.
+  assert(
+    loggedText.includes("keyring"),
+    "the private-key source label should be logged",
+  );
+  assertEquals(writes[0].specName, "sensitiveApplyResult");
+});
+
+Deno.test("ensureWireguard with no key and no keyring entry logs source=none and sets no private-key", async () => {
+  const calls: SshCall[] = [];
+  // No explicit privateKey argument and no keyring entry for this interface:
+  // the 'none' arm. Another field (address) keeps it past the empty-set guard.
+  const { context, logs } = fakeContext("192.0.2.1", {
+    wireguardKeys: { "wg-other": "RINGKEY=" },
+  });
+  await ensureWgExec(
+    {
+      interface: "wg0",
+      address: ["2001:db8:e::24/126"],
+      peers: [],
+      commit: true,
+      save: true,
+      dryRun: false,
+      _ssh: stubSsh({ stdout: "SWAMP_APPLY_CHANGED\n" }, calls),
+    },
+    context,
+  );
+  const script = String(calls[0].stdin);
+  assert(
+    !script.includes("private-key"),
+    "no private-key path should be set when none is available",
+  );
+  const loggedText = logs
+    .map((l) => `${l.message} ${JSON.stringify(l.properties ?? {})}`)
+    .join("\n");
+  assert(loggedText.includes("none"), "the source label should be 'none'");
+  // The other interface's keyring value must not leak into this interface.
+  assert(!script.includes("RINGKEY="), "another interface's key must not leak");
+});
+
 Deno.test("ensureWireguard requires at least one field", async () => {
   const { context } = fakeContext();
   await assertRejects(

@@ -12,7 +12,7 @@
  */
 import { z } from "npm:zod@4";
 
-/** Op-mode command wrapper — required for read-only "show ..." commands. */
+/** Op-mode command wrapper - required for read-only "show ..." commands. */
 export const OP_WRAPPER = "/opt/vyatta/bin/vyatta-op-cmd-wrapper";
 
 /** Sourced inside every config session so `configure`/`set`/`commit` resolve. */
@@ -106,7 +106,7 @@ export const sshExec: SshRunner = async (cfg, opts) => {
     // offers every identity the agent holds first, which can trip the server's
     // MaxAuthTries (and abort with "Too many authentication failures") before
     // this key is ever tried. The agent is still used to sign if it holds the
-    // key — this only restricts *which* identity is presented, it does not
+    // key - this only restricts *which* identity is presented, it does not
     // bypass the agent.
     args.push("-o", "IdentitiesOnly=yes", "-i", cfg.identityFile);
   }
@@ -116,7 +116,7 @@ export const sshExec: SshRunner = async (cfg, opts) => {
   // The SSH binary is the sole transport seam (see the module TODO on swapping
   // this for @swamp/ssh once context.runModel ships). The argv is fixed and
   // vetted: literal ssh flags, the integer port, and caller config/command
-  // paths that pass validateApplyPaths (no shell is involved — args go straight
+  // paths that pass validateApplyPaths (no shell is involved - args go straight
   // to execve, never a shell string). Config bodies are piped over stdin, not
   // argv.
   // swamp-quality-ignore deno-command
@@ -207,7 +207,7 @@ export function buildConfigScript(opts: ConfigScriptOptions): string {
   }
   for (const s of opts.sets) lines.push(`set ${s}`);
   lines.push("if cli-shell-api sessionChanged; then");
-  // Staged operations can still be a NET no-op — e.g. a reconcile that deletes
+  // Staged operations can still be a NET no-op - e.g. a reconcile that deletes
   // an interface subtree and re-sets it to the same values. `compare` reflects
   // the true working-vs-active diff, so gate the commit on it; otherwise an
   // already-correct apply would spuriously commit (and misreport `changed`).
@@ -228,7 +228,7 @@ export function buildConfigScript(opts: ConfigScriptOptions): string {
       // commit-confirm arms an N-minute auto-revert timer: the change is active
       // now but config.boot is left untouched, so a management-severing change
       // rolls back on its own unless `confirm` cancels the timer. Do NOT save
-      // here — an un-confirmed bad config must not survive the auto-revert
+      // here - an un-confirmed bad config must not survive the auto-revert
       // reboot; the `confirm` method saves once the change is made permanent.
       lines.push(`    commit-confirm ${confirmMinutes}`);
     } else {

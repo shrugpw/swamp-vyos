@@ -31,7 +31,7 @@ const ConfigSchema = z.object({
  * The well-known top-level sections are declared so CEL expressions can
  * reference them (e.g. `...attributes.interfaces`), and `.passthrough()` keeps
  * any section a given VyOS version emits that isn't listed here (rather than
- * silently dropping it). Nested content is intentionally permissive — the VyOS
+ * silently dropping it). Nested content is intentionally permissive - the VyOS
  * tree is deep and version-variable.
  */
 const treeSection = () => z.record(z.string(), z.unknown()).optional();
@@ -437,7 +437,7 @@ export const rawMethods = {
       const confirmPending = confirmMinutes > 0 && changed && !args.dryRun &&
         result.code === 0;
       // When sensitive, the whole record is vaulted, so redacting the script
-      // is pointless — persist it in full (it is protected by the vault).
+      // is pointless - persist it in full (it is protected by the vault).
       const persistFullScript = args.sensitive || args.storeScript;
       const targetSpec = args.sensitive
         ? "sensitiveApplyResult"
@@ -478,7 +478,7 @@ export const rawMethods = {
   },
   diff: {
     description:
-      "Preview the config change a set/delete would make (VyOS compare) without committing — read-only.",
+      "Preview the config change a set/delete would make (VyOS compare) without committing - read-only.",
     arguments: z.object({
       set: z
         .array(z.string())
@@ -513,7 +513,7 @@ export const rawMethods = {
         throw new Error("diff requires at least one set or delete command");
       }
       validateApplyPaths(args.set, args.delete);
-      // dryRun stages the change, prints `compare`, and discards — never
+      // dryRun stages the change, prints `compare`, and discards - never
       // commits. commit/save are irrelevant in the dryRun branch.
       const script = buildConfigScript({
         sets: args.set,

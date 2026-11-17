@@ -6,12 +6,12 @@
  * A `policy route`/`policy route6` ruleset only takes effect once it is BOUND
  * to an interface via `set interfaces <if> policy route <name>` (ipv6:
  * `policy route6`). That binding lives outside this subtree (on the
- * interface) and is NOT managed here — this module models the ruleset itself,
+ * interface) and is NOT managed here - this module models the ruleset itself,
  * including its own (non-activating) `interface` leaf, which some rulesets
  * carry as documentation/hint but which VyOS does not treat as the binding.
  *
  * Scope: `policy route`/`policy route6` only. `policy local-route`/
- * `local-route6` (source-based routing into tables — a different shape) is
+ * `local-route6` (source-based routing into tables - a different shape) is
  * out of scope for this module.
  *
  * @module
@@ -48,7 +48,7 @@ const PbrRuleSchema = z.object({
   number: z.number().int().positive().describe(
     "Rule number (ordering key within the ruleset; need not be contiguous)",
   ),
-  // NOTE: deliberately permissive, NOT `z.enum(["drop"])` — the design doc's
+  // NOTE: deliberately permissive, NOT `z.enum(["drop"])` - the design doc's
   // drop-only enum does not match live config, which uses action 'reject'
   // (VyOS policy-route accepts accept|drop|reject, matching firewall action
   // semantics). An enum without 'reject' fails round-trip on real rulesets.
@@ -68,7 +68,7 @@ const PbrRuleSchema = z.object({
 
 /**
  * Typed named policy-route ruleset (`policy route <name>` / `policy route6
- * <name>`) — a whole ruleset managed as one declarative unit, like firewall.
+ * <name>`) - a whole ruleset managed as one declarative unit, like firewall.
  * Cleartext: a ruleset carries no secrets (addresses/ports/groups only).
  */
 const PbrRulesetSchema = z.object({
@@ -339,7 +339,7 @@ export const pbrMethods = {
       name: z.string().describe("Named policy-route ruleset"),
       interfaces: z.array(z.string()).default([]).describe(
         "In-ruleset `interface` leaf(s) (documentation only; does NOT bind the " +
-          "ruleset — bind separately via `set interfaces <if> policy route <name>`)",
+          "ruleset - bind separately via `set interfaces <if> policy route <name>`)",
       ),
       description: z.string().optional(),
       enableDefaultLog: z.boolean().optional(),

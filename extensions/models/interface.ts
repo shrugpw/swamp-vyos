@@ -18,7 +18,7 @@ import type { ExecuteContext, ExecuteResult, SshRunner } from "./core.ts";
 
 /**
  * Typed L3 attributes of one interface (`interfaces <type> <name>`). Scoped on
- * purpose: only the attributes this model manages — NOT bridge members, hw-id,
+ * purpose: only the attributes this model manages - NOT bridge members, hw-id,
  * vif, firewall assignments, etc.
  */
 const InterfaceSchema = z.object({
@@ -67,7 +67,7 @@ export function parseInterfaceNode(
 /**
  * Compute the SCOPED set/delete paths to reconcile an interface's managed L3
  * attributes to `desired`, given its `current` state. Only touches
- * address/description/mtu/disable — never the rest of the interface subtree.
+ * address/description/mtu/disable - never the rest of the interface subtree.
  * `disable`/`description`/`mtu` left `undefined` in `desired` are not touched.
  */
 export function interfaceReconcile(
@@ -222,7 +222,7 @@ export const interfaceMethods = {
           "ensureInterface requires at least one of address/description/mtu/disable",
         );
       }
-      // Read current state so the address list can be reconciled (scoped —
+      // Read current state so the address list can be reconciled (scoped -
       // we never wipe the whole interface subtree).
       const read = await ssh(cfg, {
         command: [OP_WRAPPER, "show", "configuration", "json"],

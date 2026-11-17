@@ -369,7 +369,7 @@ Deno.test("diff stages a dryRun compare, never commits, writes the diff spec", a
     writes[0].data.diff,
     "+set interface eth0 description test",
   );
-  // The generated script previews and discards — it must never commit/save.
+  // The generated script previews and discards - it must never commit/save.
   const script = String(calls[0].stdin);
   assert(script.includes("compare"));
   assert(script.includes("exit discard"));

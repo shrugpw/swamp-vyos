@@ -235,7 +235,7 @@ Deno.test("parseDhcpSharedNetwork -> dhcpSetPaths round-trips subnet-id and ever
 Deno.test("parseDhcpSharedNetwork normalizes object-keyed multi-value option leaves (name-server / domain-search)", () => {
   // VyOS `show configuration json` renders some multi-value leaves as an
   // object keyed by value ({ "8.8.8.8": {} }) rather than an array. The parse
-  // path must normalize both shapes identically — otherwise the object form
+  // path must normalize both shapes identically - otherwise the object form
   // collapses to ["[object Object]"]. Regression test for the asArr fix.
   const objectFormNode = {
     option: { "name-server": { "8.8.8.8": {}, "1.1.1.1": {} } },
@@ -529,7 +529,7 @@ Deno.test("removeDhcpSharedNetwork writes the result BEFORE throwing on nonzero 
   assertEquals(writes[0].data.exitCode, 1);
 });
 
-Deno.test("ensureStaticMappings reads current, deletes stale, sets desired — never touches ranges/options/subnet-id", async () => {
+Deno.test("ensureStaticMappings reads current, deletes stale, sets desired - never touches ranges/options/subnet-id", async () => {
   const calls: SshCall[] = [];
   const { context, writes } = fakeContext();
   const ssh: SshRunner = (_cfg, opts) => {

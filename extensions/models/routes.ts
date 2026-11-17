@@ -45,7 +45,7 @@ const StaticBlackholeSchema = z.union([
 
 /**
  * Typed static route for one destination prefix (`protocols static route
- * <prefix>` for IPv4 or `protocols static route6 <prefix>` for IPv6 — the
+ * <prefix>` for IPv4 or `protocols static route6 <prefix>` for IPv6 - the
  * family is derived from the prefix). Managed as one declarative unit.
  * Cleartext: a route carries no secrets (prefixes/next-hops/interfaces only).
  */

@@ -5,7 +5,7 @@
  * Reconcile unit is the shared-network (`shared-network-name <SNN>`):
  * `ensureDhcpSharedNetwork` is a whole-subtree declarative reconcile (firewall
  * pattern). `ensureStaticMappings` is a SCOPED fan-out over just the
- * `static-mapping` children of one subnet (interface pattern) — the daily
+ * `static-mapping` children of one subnet (interface pattern) - the daily
  * driver for adding/removing a host reservation without touching
  * hand-tuned ranges/options/subnet-id.
  *
@@ -58,7 +58,7 @@ const DhcpStaticMappingSchema = z.object({
 
 /**
  * One `subnet <cidr>` block. `subnetId` is MANDATORY and must be unique per
- * shared-network (VyOS 1.4+) — always emitted by {@link dhcpSetPaths} so a
+ * shared-network (VyOS 1.4+) - always emitted by {@link dhcpSetPaths} so a
  * read-then-ensure round-trip never drops it (an omitted subnet-id fails
  * commit).
  */
@@ -73,7 +73,7 @@ const DhcpSubnetSchema = z.object({
 });
 
 /**
- * Typed IPv4 `service dhcp-server shared-network-name <name>` — a whole
+ * Typed IPv4 `service dhcp-server shared-network-name <name>` - a whole
  * shared-network managed as one declarative unit. Cleartext: this subtree
  * carries no secrets (leases/addresses only).
  */
@@ -141,7 +141,7 @@ export interface DhcpSharedNetworkState {
 
 /**
  * Normalize a live JSON leaf that may render as a scalar, an array, an
- * object-keyed-by-value (`{ "8.8.8.8": {} }` — VyOS renders some multi-value
+ * object-keyed-by-value (`{ "8.8.8.8": {} }` - VyOS renders some multi-value
  * leaves this way, e.g. `option name-server`/`domain-search`), or absent.
  * Matches the dns_forwarding `asList` helper so the equivalent leaves round-trip
  * regardless of which JSON shape `show configuration json` emits for them.
@@ -202,7 +202,7 @@ function dhcpStaticMappingPaths(
 /** Emit the `set` leaves for one subnet, including its mandatory subnet-id. */
 function dhcpSubnetPaths(snnBase: string, subnet: DhcpSubnetDesired): string[] {
   const base = `${snnBase} subnet ${subnet.cidr}`;
-  // subnet-id is REQUIRED and must always be emitted — omitting it (e.g. if a
+  // subnet-id is REQUIRED and must always be emitted - omitting it (e.g. if a
   // sync->ensure round-trip dropped the field) would fail commit.
   const paths: string[] = [`${base} subnet-id ${subnet.subnetId}`];
   if (subnet.lease !== undefined) paths.push(`${base} lease ${subnet.lease}`);
@@ -605,7 +605,7 @@ export const dhcpMethods = {
   },
   ensureStaticMappings: {
     description:
-      "Declaratively reconcile ONLY the static-mapping reservations under one DHCP subnet (read current, delete stale, set desired). Never touches ranges/options/subnet-id — the safe daily driver for adding/removing a host reservation.",
+      "Declaratively reconcile ONLY the static-mapping reservations under one DHCP subnet (read current, delete stale, set desired). Never touches ranges/options/subnet-id - the safe daily driver for adding/removing a host reservation.",
     arguments: z.object({
       sharedNetwork: z.string().describe("Shared-network-name, e.g. SERVERS"),
       subnet: z.string().describe("Subnet CIDR, e.g. 198.51.100.0/24"),
@@ -628,7 +628,7 @@ export const dhcpMethods = {
     ): Promise<ExecuteResult> => {
       const cfg = context.globalArgs;
       const ssh = args._ssh ?? sshExec;
-      // Read current state so only the static-mapping children are diffed —
+      // Read current state so only the static-mapping children are diffed -
       // scoped, we never wipe the subnet or shared-network subtree.
       const read = await ssh(cfg, {
         command: [OP_WRAPPER, "show", "configuration", "json"],

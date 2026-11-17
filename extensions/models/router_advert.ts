@@ -30,7 +30,7 @@ const RaPrefixSchema = z.object({
 });
 
 /**
- * Typed router-advert (IPv6 RA / SLAAC) config for one interface — the first
+ * Typed router-advert (IPv6 RA / SLAAC) config for one interface - the first
  * per-resource model on top of the raw config transport.
  */
 const RouterAdvertSchema = z.object({

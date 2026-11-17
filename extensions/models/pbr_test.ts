@@ -2,7 +2,7 @@
  * Unit tests for the @shrug/vyos policy-route (PBR) family.
  *
  * NOTE: `pbr.ts` is not yet wired into `vyos.ts` (that wiring is left to the
- * integrator, alongside the other family modules) — so these tests exercise
+ * integrator, alongside the other family modules) - so these tests exercise
  * `pbrMethods` directly rather than via `model.methods`, unlike the other
  * `*_test.ts` files in this directory. `firewallSetPaths`-adjacent behavior
  * (structured match blocks, groups) is already covered by `firewall_test.ts`

@@ -2,7 +2,7 @@
 
 A swamp model for managing a [VyOS](https://vyos.io) router over SSH. It reads
 the running configuration, applies `set`/`delete` configuration commands, and
-runs arbitrary operational- or config-mode commands — encoding the VyOS quirks
+runs arbitrary operational- or config-mode commands - encoding the VyOS quirks
 so callers work in terms of plain config paths instead of `vbash` incantations.
 
 VyOS is peculiar: configuration mode requires `vbash` sourcing the Vyatta
@@ -61,41 +61,41 @@ swamp model method run my-router confirm
 
 ## Methods
 
-- **`show`** — run an op-mode command (default `show configuration commands`)
+- **`show`** - run an op-mode command (default `show configuration commands`)
   and snapshot the raw output to the `config` resource.
-- **`tree`** — read the running config as a **structured** tree via native
+- **`tree`** - read the running config as a **structured** tree via native
   `show configuration json`, so it can be queried with CEL (e.g.
-  `…attributes.interfaces.ethernet`). Writes the `configTree` resource (or
-  `sensitiveConfigTree` when `sensitive=true` — the tree embeds WireGuard and
+  `...attributes.interfaces.ethernet`). Writes the `configTree` resource (or
+  `sensitiveConfigTree` when `sensitive=true` - the tree embeds WireGuard and
   PKI private keys, so it is secret-bearing by nature). Well-known top-level
   sections are declared; unknown ones are preserved.
-- **`apply`** — apply `set`/`delete` config paths through `vbash`, then `commit`
+- **`apply`** - apply `set`/`delete` config paths through `vbash`, then `commit`
   and `save` (both toggleable). Requires at least one `set` or `delete`. Pass
   `dryRun=true` to stage and print the diff without committing,
   `storeScript=true` to persist the generated script, and `sensitive=true` to
   vault the secret-bearing fields (see below). Pass `confirmMinutes=<N>` (with
-  `commit=true`, not `dryRun`) to commit with VyOS **`commit-confirm <N>`** — an
-  N-minute auto-revert timer — instead of a plain commit, for a
+  `commit=true`, not `dryRun`) to commit with VyOS **`commit-confirm <N>`** - an
+  N-minute auto-revert timer - instead of a plain commit, for a
   management-severing change (e.g. a firewall base-chain or mgmt-path interface
   change) that must roll back if it cuts your access. In that path `apply`
   deliberately does **not** `save`: an un-confirmed config must not land in
   `config.boot` ahead of the auto-revert. The result records `confirmPending` /
   `confirmMinutes`. **Caveat:** a change that severs the mgmt path can drop the
   SSH session before `apply` returns, so `apply` may throw and `confirmPending`
-  may read false even though the router armed the timer — treat the auto-revert
+  may read false even though the router armed the timer - treat the auto-revert
   timer, not the `confirmPending` field, as the real safety net, verify
   reachability out of band, and only then `confirm`.
-- **`confirm`** — make a pending `commit-confirm` permanent: cancel the
+- **`confirm`** - make a pending `commit-confirm` permanent: cancel the
   auto-revert timer (op-mode `confirm`), then `save` the now-permanent running
   config to `config.boot` (`save=false` to skip the save). Writes the
   `confirmResult` resource. Run it once you have verified the router is still
   reachable after a `confirmMinutes` apply.
-- **`diff`** — **read-only** preview of what a `set`/`delete` would change. It
-  stages the change, runs VyOS `compare`, and discards the session — it never
+- **`diff`** - **read-only** preview of what a `set`/`delete` would change. It
+  stages the change, runs VyOS `compare`, and discards the session - it never
   commits. Writes the `compare` output to the `diff` resource (or
   `sensitiveDiff` when `sensitive=true`). Requires at least one `set` or
   `delete`.
-- **`run`** — run an arbitrary command over SSH; set `opMode=true` to prefix the
+- **`run`** - run an arbitrary command over SSH; set `opMode=true` to prefix the
   VyOS op-mode wrapper.
 
 ### Typed resources
@@ -104,18 +104,18 @@ On top of the raw config methods, the model exposes **typed, declarative**
 methods for specific VyOS resources. The first is IPv6 **router-advert** (RA /
 SLAAC):
 
-- **`syncRouterAdvert`** — read the current RA config for one interface into a
+- **`syncRouterAdvert`** - read the current RA config for one interface into a
   typed `routerAdvert` resource (`prefixes`, `routes`, `nat64prefixes`,
   `defaultLifetime`, `exists`).
-- **`ensureRouterAdvert`** — declaratively set the RA config for one interface.
+- **`ensureRouterAdvert`** - declaratively set the RA config for one interface.
   It reconciles to **exactly** the desired state (wipes the interface's RA
   subtree, then sets the desired paths in one session), so stale entries are
   removed and re-running with the same input is a true no-op (`changed=false`).
   Supports `dryRun`.
-- **`removeRouterAdvert`** — delete all RA config for one interface.
+- **`removeRouterAdvert`** - delete all RA config for one interface.
 
 **WireGuard** (`syncWireguard` / `ensureWireguard` / `removeWireguard`) manages
-one `interfaces wireguard <if>` — address/port/mtu, `ipv6 adjust-mss`, and peers
+one `interfaces wireguard <if>` - address/port/mtu, `ipv6 adjust-mss`, and peers
 (public-key, endpoint address/port, allowed-ips, keepalive, preshared-key). It
 is **secret-bearing** (interface `private-key`, per-peer `preshared-key`), so
 the whole `wireguard` resource is vaulted (`sensitiveOutput`, `vyos` vault) and
@@ -124,7 +124,7 @@ the whole `wireguard` resource is vaulted (`sensitiveOutput`, `vyos` vault) and
 `ensureRouterAdvert` (idempotent).
 
 **Interface** (`syncInterface` / `ensureInterface`) manages the **scoped** L3
-attributes of one `interfaces <type> <name>` — `address` (list, reconciled),
+attributes of one `interfaces <type> <name>` - `address` (list, reconciled),
 `description`, `mtu`, `disable`. It is deliberately scoped: `ensureInterface`
 **never wipes the interface subtree**, so bridge members, `hw-id`, `vif`,
 firewall assignments, etc. are left untouched (it reads current state to
@@ -132,19 +132,19 @@ reconcile only the address list). Full interface removal is intentionally left
 to raw `apply --delete` rather than a typed method.
 
 **Firewall** (`syncFirewall` / `ensureFirewall` / `removeFirewall`) manages one
-named ruleset of the hook-based (VyOS 1.4+) firewall — `firewall <family> name
+named ruleset of the hook-based (VyOS 1.4+) firewall - `firewall <family> name
 <name>`, where `family` is `ipv4` or `ipv6`. A ruleset is managed as **one
 declarative unit**: `ensureFirewall` wipes the named-ruleset subtree and sets the
 desired `default-action`, `description`, and numbered `rules` in one session, so
 the ruleset ends up **exactly** as specified (rules you omit are removed) and
 re-running the same input is a true no-op. Each rule models the common
-match/target leaves — `action`, `protocol`, `state[]`, `source`/`destination`
+match/target leaves - `action`, `protocol`, `state[]`, `source`/`destination`
 (`address`, `port`, and `group` address-/network-/port-group), `inboundInterface`
-/ `outboundInterface`, `jumpTarget`, `log`, `disable` — plus a `raw[]` escape
+/ `outboundInterface`, `jumpTarget`, `log`, `disable` - plus a `raw[]` escape
 hatch for any leaf not modeled (appended verbatim under the rule). The
 `firewallRuleset` resource is cleartext (a ruleset carries no secrets). Because
 the whole ruleset is authoritative, always pass the **complete** set of rules (or
-`syncFirewall` first and amend that state) — an omitted rule is a deletion.
+`syncFirewall` first and amend that state) - an omitted rule is a deletion.
 
 ```sh
 # Preview a whole-ruleset reconcile (add/replace rules; omitted rules removed):
@@ -163,7 +163,7 @@ swamp model method run my-router syncFirewall --input family=ipv4 --input name=G
 
 ```sh
 # Declaratively pin an interface to a single prefix + default route
-# (removes any stale prefixes, e.g. a leftover ::/64) — preview first:
+# (removes any stale prefixes, e.g. a leftover ::/64) - preview first:
 swamp model method run my-router ensureRouterAdvert --input interface=eth1 \
   --input prefixes='[{"prefix":"2001:db8:1::/64"}]' \
   --input routes='["::/0"]' --input dryRun=true
@@ -172,16 +172,16 @@ swamp model method run my-router syncRouterAdvert --input interface=eth1
 ```
 
 **NAT** (`syncNat` / `ensureNat` / `removeNat`) manages one NAT **direction**'s
-rule list — `nat source` or `nat destination` (`direction` arg) — declaratively
+rule list - `nat source` or `nat destination` (`direction` arg) - declaratively
 as one unit, exactly like a firewall ruleset: `ensureNat` wipes the direction's
 `rule` subtree and sets the desired rules, so the direction ends up **exactly**
 as specified (omitted rules removed) and a repeat is a true no-op. Each rule
 models `protocol`, `source`/`destination` (`address`, `port`, and `group`
 address-/network-/port-group), `inboundInterface` / `outboundInterface`,
-`translation` (`address` — an IP/range or the literal `masquerade` — and `port`),
+`translation` (`address` - an IP/range or the literal `masquerade` - and `port`),
 `exclude`, `disable`, `log`, plus a `raw[]` escape hatch. Cleartext `natRuleset`
 resource. As with firewall, pass the **complete** rule list (or `syncNat` first
-and amend) — an omitted rule is a deletion.
+and amend) - an omitted rule is a deletion.
 
 ```sh
 # Preview a source-NAT (masquerade) reconcile:
@@ -195,8 +195,8 @@ swamp model method run my-router syncNat --input direction=source
 ```
 
 **Static routes** (`syncStaticRoute` / `ensureStaticRoute` / `removeStaticRoute`)
-manages one destination **prefix** — `protocols static route <prefix>` (IPv4) or
-`route6 <prefix>` (IPv6), auto-selected from the prefix — declaratively, like
+manages one destination **prefix** - `protocols static route <prefix>` (IPv4) or
+`route6 <prefix>` (IPv6), auto-selected from the prefix - declaratively, like
 router-advert manages one interface. `ensureStaticRoute` wipes the prefix's
 subtree and sets the desired `nextHops` (each with optional `distance` /
 `disable` / `interface`), `interfaceRoutes`, `blackhole`, `dhcpInterface`, and
@@ -241,7 +241,7 @@ swamp model method run my-router syncDnsForwarding
 **DHCP server** (`syncDhcpSharedNetwork` / `ensureDhcpSharedNetwork` /
 `removeDhcpSharedNetwork` / `ensureStaticMappings`) manages one IPv4
 `service dhcp-server shared-network-name <SNN>` (instance = the shared-network
-name). `ensureDhcpSharedNetwork` is **whole-SNN declarative** — it wipes the SNN
+name). `ensureDhcpSharedNetwork` is **whole-SNN declarative** - it wipes the SNN
 subtree and re-sets the desired shared-network `options` and `subnets[]` (each with
 its **mandatory** `subnetId`, `lease`, `options`, numbered `ranges[]`, and
 `staticMappings[]`), so an omitted subnet or mapping is a deletion and a repeat is a
@@ -270,7 +270,7 @@ swamp model method run my-router ensureStaticMappings \
 ```
 
 **Container** (`syncContainer` / `ensureContainer` / `removeContainer`) manages one
-`container name <name>` declaratively — `image`, `command`, `restart`, `hostName`,
+`container name <name>` declaratively - `image`, `command`, `restart`, `hostName`,
 `uid`/`gid`, the valueless flags (`disable`, `allowHostNetworks`, `allowHostPid`),
 `capabilities[]`, `devices[]`, `environment[]`, `volumes[]` (`source`/`destination`
 /`mode`), `networks[]`, `ports[]`, plus a `raw[]` hatch. Because a container's
@@ -278,7 +278,7 @@ swamp model method run my-router ensureStaticMappings \
 **vaulted** (`sensitiveOutput`, `vyos` vault), exactly like WireGuard, and
 `ensure`/`remove` write the vaulted `sensitiveApplyResult`; a `vyos` vault must be
 configured. **Note:** committing container config regenerates the systemd unit and
-may pull the image / restart the container — slow and disruptive, so run
+may pull the image / restart the container - slow and disruptive, so run
 image-changing `ensure`s deliberately.
 
 ```sh
@@ -297,7 +297,7 @@ swamp model method run my-router syncContainer --input name=metrics-agent
 **Policy route (PBR)** (`syncPolicyRoute` / `ensurePolicyRoute` /
 `removePolicyRoute`) manages one `policy route <name>` (IPv4) or `policy route6
 <name>` (IPv6, auto-selected from the `family` arg) as **one declarative unit**,
-like a firewall ruleset — it shares the firewall rule's `source`/`destination`
+like a firewall ruleset - it shares the firewall rule's `source`/`destination`
 match schema (`address`, `port`, `group` address-/network-/port-group).
 `ensurePolicyRoute` wipes the ruleset subtree and sets the desired `interface`,
 `description`, `enableDefaultLog`, and numbered `rules[]` (`action`, `protocol`,
@@ -305,7 +305,7 @@ match schema (`address`, `port`, `group` address-/network-/port-group).
 an omitted rule is a deletion and a repeat is a no-op. Instance name is
 `<family>-<name>` (e.g. `ipv4-mgmt`). **Note:** a policy-route ruleset only takes
 effect once **bound** to an interface via `set interfaces <if> policy route <name>`,
-which lives outside this subtree (on the interface) — the in-ruleset `interface`
+which lives outside this subtree (on the interface) - the in-ruleset `interface`
 leaf is modeled but is not that activation binding.
 
 ```sh
@@ -327,9 +327,9 @@ the generated script. When a change carries secrets (WireGuard/PKI private keys,
 pre-shared keys), pass `sensitive=true`. The result is then written to the
 `sensitiveApplyResult` spec, where the secret-bearing fields (`set`, `delete`,
 `script`, `stdout`, `stderr`) are marked sensitive: their values are stored in a
-vault named **`vyos`** and replaced with `${{ vault.get('vyos', …) }}`
+vault named **`vyos`** and replaced with `${{ vault.get('vyos', ...) }}`
 references at persist time. Operational fields (`host`, `changed`, `committed`,
-`exitCode`, …) stay in cleartext so the record is still glanceable.
+`exitCode`, ...) stay in cleartext so the record is still glanceable.
 
 Create the vault once before using the flag:
 
@@ -338,11 +338,11 @@ swamp vault create local_encryption vyos
 ```
 
 `local_encryption` is a built-in, dependency-free AES-GCM backend; any other
-configured vault type works too — just name it `vyos`. Without a `vyos` vault
+configured vault type works too - just name it `vyos`. Without a `vyos` vault
 configured, a `sensitive=true` apply fails at persist time.
 
 `diff` takes the same `sensitive=true` flag (its `compare` output echoes the
-staged `set` lines, which can include keys) — it writes to the `sensitiveDiff`
+staged `set` lines, which can include keys) - it writes to the `sensitiveDiff`
 spec with `set`/`delete`/`diff`/`stderr` vaulted.
 
 `tree` also takes `sensitive=true`. Because the full config tree is secret-laden
@@ -358,14 +358,14 @@ source `/opt/vyatta/etc/functions/script-template` so `configure`/`set`/`commit`
 resolve; op-mode reads use `/opt/vyatta/bin/vyatta-op-cmd-wrapper`. The sole
 subprocess is that one `ssh` spawn, and its argument vector is fixed and vetted:
 literal `ssh` flags, the integer port, and caller-supplied config/command paths
-that pass `validateApplyPaths` (no shell is ever involved — arguments go
+that pass `validateApplyPaths` (no shell is ever involved - arguments go
 straight to `execve`, and config bodies travel over stdin, never the argv).
 
 **Prerequisites:** the host running swamp must reach the router over SSH with
-key/agent auth (the model uses `BatchMode=yes` — no interactive prompts). Set
+key/agent auth (the model uses `BatchMode=yes` - no interactive prompts). Set
 `identityFile` in the global arguments to pin a specific key, or rely on your
 SSH agent / `~/.ssh/config`. When `identityFile` is set the model also passes
-`IdentitiesOnly=yes`, so only that key is offered — this avoids tripping the
+`IdentitiesOnly=yes`, so only that key is offered - this avoids tripping the
 router's `MaxAuthTries` when your agent holds many keys (a common cause of "Too
 many authentication failures"). The agent is still used to sign if it holds the
 key.
@@ -375,4 +375,4 @@ bounce `dhclient`, so an `apply` call may take a while to return.
 
 ## License
 
-MIT — see LICENSE.txt for details.
+MIT - see LICENSE.txt for details.

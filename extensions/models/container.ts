@@ -5,12 +5,12 @@
  * Secrets fork: the whole container record is vaulted (`sensitiveOutput` +
  * `vaultName: "vyos"`), wireguard-style. `environment <NAME> value <v>` can
  * carry live secrets (e.g. a Tailscale auth key), and containers in general
- * are secret-laden, so the entire record — image/command/volumes/environment
- * included — becomes vault refs on read rather than modeling secrecy leaf by
+ * are secret-laden, so the entire record - image/command/volumes/environment
+ * included - becomes vault refs on read rather than modeling secrecy leaf by
  * leaf. Trade-off accepted: image/volumes are not glanceable in cleartext.
  *
  * OPERATIONAL CAVEAT: committing a container change regenerates the
- * container's systemd unit and can pull the image / restart the container —
+ * container's systemd unit and can pull the image / restart the container -
  * slow and disruptive, akin to the dhclient bounce on interface apply.
  * `ensureContainer`/`removeContainer` may take a while to return; run
  * image-changing applies deliberately.
@@ -240,7 +240,7 @@ export function parseContainer(
 
   // `capability` is a multi-value leaf; VyOS's JSON renders a single value as
   // a bare string, more than one as an array, but some code paths key it by
-  // value instead — normalize all three shapes to string[].
+  // value instead - normalize all three shapes to string[].
   const asCapabilities = (v: unknown): string[] => {
     if (Array.isArray(v)) return v.map(String);
     if (v && typeof v === "object") {
@@ -328,7 +328,7 @@ export function parseContainer(
 export const containerResources = {
   "container": {
     description:
-      "Typed container config (whole record vaulted — image/command/volumes/environment may carry secrets)",
+      "Typed container config (whole record vaulted - image/command/volumes/environment may carry secrets)",
     schema: ContainerSchema,
     sensitiveOutput: true,
     vaultName: "vyos",
@@ -428,7 +428,7 @@ export const containerMethods = {
     description:
       "Declaratively set one container's whole config (reconciles to exactly the desired state; result is vaulted). " +
       "CAVEAT: committing regenerates the container's systemd unit and can pull the image / restart the " +
-      "container — slow and disruptive; this may take a while to return.",
+      "container - slow and disruptive; this may take a while to return.",
     arguments: z.object({
       name: z.string().describe("Container name, e.g. metrics-agent"),
       image: z.string().describe("Container image reference"),
@@ -537,7 +537,7 @@ export const containerMethods = {
   removeContainer: {
     description:
       "Delete a container's config (its whole subtree; result vaulted). " +
-      "CAVEAT: committing regenerates/removes the systemd unit and stops the container — " +
+      "CAVEAT: committing regenerates/removes the systemd unit and stops the container - " +
       "this may take a while to return.",
     arguments: z.object({
       name: z.string().describe("Container name, e.g. metrics-agent"),

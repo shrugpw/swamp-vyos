@@ -63,7 +63,7 @@ const FirewallRuleSchema = z.object({
 });
 
 /**
- * Typed named firewall ruleset (`firewall <family> name <name>`) — a whole
+ * Typed named firewall ruleset (`firewall <family> name <name>`) - a whole
  * hook-based (VyOS 1.4+) ruleset managed as one declarative unit. Cleartext: a
  * ruleset carries no secrets (addresses/ports/groups only).
  */

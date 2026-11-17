@@ -162,7 +162,7 @@ export function parseWireguardInterface(
 export const wireguardResources = {
   "wireguard": {
     description:
-      "Typed WireGuard interface config (whole record vaulted — carries private/preshared keys)",
+      "Typed WireGuard interface config (whole record vaulted - carries private/preshared keys)",
     schema: WireguardSchema,
     sensitiveOutput: true,
     vaultName: "vyos",
@@ -363,7 +363,7 @@ export const wireguardMethods = {
   },
   removeWireguard: {
     description:
-      "Delete a WireGuard interface's config (result vaulted — the diff exposes keys).",
+      "Delete a WireGuard interface's config (result vaulted - the diff exposes keys).",
     arguments: z.object({
       interface: z.string(),
       commit: z.boolean().default(true),

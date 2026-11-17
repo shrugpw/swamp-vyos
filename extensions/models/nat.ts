@@ -64,7 +64,7 @@ const NatRuleSchema = z.object({
 });
 
 /**
- * Typed NAT rule list for one direction (`nat source` | `nat destination`) — a
+ * Typed NAT rule list for one direction (`nat source` | `nat destination`) - a
  * whole direction's rules managed as one declarative unit. Cleartext: NAT rules
  * carry no secrets (addresses/ports/interfaces only).
  */

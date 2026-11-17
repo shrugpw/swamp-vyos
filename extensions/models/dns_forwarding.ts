@@ -18,7 +18,7 @@ import type { ExecuteContext, ExecuteResult, SshRunner } from "./core.ts";
 /**
  * A per-domain forwarding override (`service dns forwarding domain <name>`).
  * `raw` is a deviation from the design doc (which didn't include it at this
- * level) — added per the general "raw at every schema level" build rule since
+ * level) - added per the general "raw at every schema level" build rule since
  * declarative reconcile is round-trip-lossy for any unmodeled leaf.
  */
 const DnsDomainSchema = z.object({
@@ -36,7 +36,7 @@ const DnsDomainSchema = z.object({
 });
 
 /**
- * Typed `service dns forwarding` config — a singleton (instance name always
+ * Typed `service dns forwarding` config - a singleton (instance name always
  * `current`) reconciled as one declarative unit, like router-advert.
  */
 const DnsForwardingSchema = z.object({
